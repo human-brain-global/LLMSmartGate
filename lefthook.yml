@@ -1,0 +1,29 @@
+# Lefthook git hooks configuration
+# Install: brew install lefthook (macOS) or go install github.com/evilmartians/lefthook@latest
+# Setup: lefthook install
+
+pre-commit:
+  parallel: true
+  commands:
+    rust-fmt:
+      glob: "gateway/**/*.rs"
+      run: cd gateway && cargo fmt -- --check
+    rust-clippy:
+      glob: "gateway/**/*.rs"
+      run: cd gateway && cargo clippy --all-targets -- -D warnings
+    frontend-lint:
+      glob: "admin-console/**/*.{ts,svelte}"
+      run: cd admin-console && pnpm lint
+    frontend-format:
+      glob: "admin-console/**/*.{ts,svelte}"
+      run: cd admin-console && pnpm format --check
+    python-lint:
+      glob: "sdk-python/**/*.py"
+      run: cd sdk-python && uv run ruff check && uv run ruff format --check
+
+pre-push:
+  commands:
+    rust-test:
+      run: cd gateway && cargo nextest run
+    frontend-check:
+      run: cd admin-console && pnpm check

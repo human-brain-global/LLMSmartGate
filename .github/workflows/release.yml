@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  gateway-image:
+    name: Build Gateway Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: gateway
+          push: false  # TODO: Configure registry and enable push
+          tags: llmsmartgate/gateway:${{ github.ref_name }}
+
+  admin-console-image:
+    name: Build Admin Console Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: admin-console
+          push: false  # TODO: Configure registry and enable push
+          tags: llmsmartgate/admin-console:${{ github.ref_name }}
+
+  sdk-publish:
+    name: Publish Python SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk-python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      # TODO: Configure PyPI publishing
+      # - run: uv publish

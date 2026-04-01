@@ -1,0 +1,46 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'admin-console/src/**'
+      - 'sdk-python/src/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'admin-console/src/**'
+      - 'sdk-python/src/**'
+  schedule:
+    - cron: '0 8 * * 1'  # Weekly Monday at 08:00 UTC
+
+jobs:
+  analyze-typescript:
+    name: CodeQL (TypeScript)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          source-root: admin-console
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript
+
+  analyze-python:
+    name: CodeQL (Python)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          source-root: sdk-python
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:python

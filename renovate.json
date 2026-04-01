@@ -1,0 +1,28 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits"
+  ],
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Group Rust dependency updates",
+      "matchManagers": ["cargo"],
+      "groupName": "rust dependencies",
+      "automerge": false
+    },
+    {
+      "description": "Group Node.js dependency updates",
+      "matchManagers": ["npm"],
+      "groupName": "node dependencies",
+      "automerge": false
+    },
+    {
+      "description": "Group Python dependency updates",
+      "matchManagers": ["pep621"],
+      "groupName": "python dependencies",
+      "automerge": false
+    }
+  ]
+}

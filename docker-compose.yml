@@ -1,0 +1,31 @@
+# Local development infrastructure
+# Usage: docker compose up -d
+services:
+  postgres:
+    image: postgres:17-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: llmsmartgate
+      POSTGRES_PASSWORD: llmsmartgate
+      POSTGRES_DB: llmsmartgate
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llmsmartgate"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

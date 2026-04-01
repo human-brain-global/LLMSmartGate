@@ -1,0 +1,6 @@
+apiVersion: v2
+name: llmsmartgate
+description: LLMSmartGate - Self-hosted LLM API Gateway
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

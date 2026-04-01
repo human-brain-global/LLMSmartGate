@@ -1,0 +1,38 @@
+# ── Rust (gateway/) ──
+gateway/target/
+**/*.rs.bk
+
+# ── Node.js (admin-console/) ──
+admin-console/node_modules/
+admin-console/.svelte-kit/
+admin-console/build/
+admin-console/dist/
+
+# ── Python (sdk-python/) ──
+sdk-python/.venv/
+sdk-python/dist/
+sdk-python/**/__pycache__/
+sdk-python/**/*.pyc
+sdk-python/**/*.pyo
+sdk-python/**/*.egg-info/
+
+# ── Environment ──
+.env
+.env.local
+.env.*.local
+
+# ── Claude Code ──
+.agents/
+.claude/
+skills-lock.json
+
+# ── IDE ──
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Build artifacts ──
+*.log

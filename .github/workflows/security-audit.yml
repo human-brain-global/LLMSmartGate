@@ -1,0 +1,39 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 06:00 UTC
+  push:
+    branches: [main]
+    paths:
+      - 'gateway/Cargo.lock'
+      - 'admin-console/package-lock.json'
+      - 'admin-console/pnpm-lock.yaml'
+      - 'sdk-python/uv.lock'
+
+jobs:
+  rust-audit:
+    name: Rust Dependency Audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit cargo-deny
+      - run: cargo audit
+      - run: cargo deny check
+
+  container-scan:
+    name: Container Image Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pin trivy to v0.69.3 -- v0.69.4-0.69.6 were compromised
+      - uses: aquasecurity/trivy-action@0.32.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: 1
