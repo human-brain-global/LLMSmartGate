@@ -110,6 +110,32 @@ impl KeyRepo {
         .ok_or_else(|| StorageError::not_found("key", "id", id))
     }
 
+    /// Revoke a key scoped to a specific service account, preventing IDOR.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::NotFound`] if no key with the given ID and
+    /// service account exists.
+    pub async fn revoke_scoped(
+        &self,
+        id: KeyId,
+        service_account_id: ServiceAccountId,
+    ) -> Result<ServiceAccountKey, StorageError> {
+        sqlx::query_as::<_, ServiceAccountKey>(
+            r"UPDATE service_account_keys
+               SET status = $1, revoked_at = NOW()
+               WHERE id = $2 AND service_account_id = $3
+               RETURNING id, service_account_id, key_id, algorithm, public_key_pem,
+                         fingerprint, status, expires_at, created_at, revoked_at, last_used_at",
+        )
+        .bind(KeyStatus::Revoked)
+        .bind(id)
+        .bind(service_account_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StorageError::not_found("key", "id", id))
+    }
+
     /// Update the `last_used_at` timestamp (fire-and-forget in the hot path).
     ///
     /// # Errors

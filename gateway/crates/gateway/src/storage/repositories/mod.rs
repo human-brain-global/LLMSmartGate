@@ -1,5 +1,6 @@
 //! Database repositories for each domain entity.
 
+pub mod admin_api_keys;
 pub mod audit;
 pub mod keys;
 pub mod policies;

@@ -28,11 +28,18 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let addr = SocketAddr::from((config.server.host, config.server.port));
+    // Admin key cache: 30-second TTL, single entry
+    let admin_key_cache = moka::future::Cache::builder()
+        .time_to_live(std::time::Duration::from_secs(30))
+        .max_capacity(1)
+        .build();
+
     let state = AppState {
         config: Arc::new(config),
         db: None,
         redis: None,
         key_store: None,
+        admin_key_cache: Some(admin_key_cache),
     };
     let app = build_router(state);
 

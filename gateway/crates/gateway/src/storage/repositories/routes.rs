@@ -17,6 +17,51 @@ impl RouteRepo {
         Self { pool }
     }
 
+    /// List global routes (tenant_id IS NULL) with cursor-based pagination.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::Database`] on connection or query failure.
+    pub async fn list_global(
+        &self,
+        cursor: Option<&Cursor>,
+        limit: i64,
+    ) -> Result<Page<ProviderRoute>, StorageError> {
+        let (limit, fetch_limit) = clamp_limit(limit);
+
+        let rows = if let Some(c) = cursor {
+            let (ts, id) = c.decode().map_err(StorageError::InvalidCursor)?;
+            sqlx::query_as::<_, ProviderRoute>(
+                r"
+                SELECT * FROM provider_routes
+                WHERE tenant_id IS NULL
+                  AND (created_at, id) > ($1, $2)
+                ORDER BY created_at ASC, id ASC
+                LIMIT $3
+                ",
+            )
+            .bind(ts)
+            .bind(id)
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, ProviderRoute>(
+                r"
+                SELECT * FROM provider_routes
+                WHERE tenant_id IS NULL
+                ORDER BY created_at ASC, id ASC
+                LIMIT $1
+                ",
+            )
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        Ok(Page::from_rows(rows, limit, |r| (r.created_at, r.id.0)))
+    }
+
     /// Insert a new route and return the full row.
     ///
     /// # Errors

@@ -468,6 +468,23 @@ pub struct CreatePricingRule {
 }
 
 // ===========================================================================
+// Admin API Key
+// ===========================================================================
+
+/// Row struct for the `admin_api_keys` table.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AdminApiKey {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(skip_serializing)]
+    pub key_hash: String,
+    pub role: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 

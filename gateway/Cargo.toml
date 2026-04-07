@@ -32,6 +32,7 @@ redis = { version = "1", features = ["aio", "tokio-comp"] }
 deadpool-redis = "0.23"
 
 # Cryptography
+bcrypt = "0.17"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.10"
 rand = "0.8"

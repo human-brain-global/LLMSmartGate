@@ -77,6 +77,12 @@ pub enum GatewayError {
 
     #[error("validation error: {message}")]
     Validation { code: String, message: String },
+
+    #[error("{message}")]
+    NotFound { code: String, message: String },
+
+    #[error("{message}")]
+    Conflict { code: String, message: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +100,8 @@ impl GatewayError {
             Self::Routing { .. } => StatusCode::BAD_GATEWAY,
             Self::Storage { .. } | Self::Config { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::NotFound { .. } => StatusCode::NOT_FOUND,
+            Self::Conflict { .. } => StatusCode::CONFLICT,
         }
     }
 
@@ -109,6 +117,8 @@ impl GatewayError {
             Self::Storage { .. } => "storage_error",
             Self::Config { .. } => "configuration_error",
             Self::Validation { .. } => "validation_error",
+            Self::NotFound { .. } => "not_found_error",
+            Self::Conflict { .. } => "conflict_error",
         }
     }
 
@@ -123,6 +133,8 @@ impl GatewayError {
             | Self::Storage { code, message }
             | Self::Config { code, message }
             | Self::Validation { code, message }
+            | Self::NotFound { code, message }
+            | Self::Conflict { code, message }
             | Self::RateLimit { code, message, .. }
             | Self::Provider { code, message, .. } => (code.as_str(), message.as_str()),
         };
@@ -242,6 +254,20 @@ impl GatewayError {
 
     pub fn validation(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Validation {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn not_found(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::NotFound {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn conflict(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Conflict {
             code: code.into(),
             message: message.into(),
         }

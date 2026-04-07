@@ -71,7 +71,7 @@ impl TenantRepo {
         .ok_or_else(|| StorageError::not_found("tenant", "slug", slug))
     }
 
-    /// List tenants with cursor-based pagination.
+    /// List tenants with cursor-based pagination and optional status filter.
     ///
     /// # Errors
     ///
@@ -80,34 +80,35 @@ impl TenantRepo {
         &self,
         cursor: Option<&Cursor>,
         limit: i64,
+        status: Option<TenantStatus>,
     ) -> Result<Page<Tenant>, StorageError> {
         let (limit, fetch_limit) = clamp_limit(limit);
 
-        let rows = if let Some(c) = cursor {
-            let (ts, id) = c.decode().map_err(StorageError::InvalidCursor)?;
-            sqlx::query_as::<_, Tenant>(
-                r"SELECT id, name, slug, status, metadata, created_at, updated_at
-                   FROM tenants
-                   WHERE (created_at, id) < ($1, $2)
-                   ORDER BY created_at DESC, id DESC
-                   LIMIT $3",
-            )
-            .bind(ts)
-            .bind(id)
-            .bind(fetch_limit)
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query_as::<_, Tenant>(
-                r"SELECT id, name, slug, status, metadata, created_at, updated_at
-                   FROM tenants
-                   ORDER BY created_at DESC, id DESC
-                   LIMIT $1",
-            )
-            .bind(fetch_limit)
-            .fetch_all(&self.pool)
-            .await?
+        let (cursor_ts, cursor_id) = match cursor {
+            Some(c) => {
+                let (ts, id) = c.decode().map_err(StorageError::InvalidCursor)?;
+                (Some(ts), Some(id))
+            }
+            None => (None, None),
         };
+
+        let rows = sqlx::query_as::<_, Tenant>(
+            r"SELECT id, name, slug, status, metadata, created_at, updated_at
+               FROM tenants
+               WHERE ($1::tenant_status IS NULL OR status = $1)
+                 AND (
+                     $2::TIMESTAMPTZ IS NULL
+                     OR (created_at, id) < ($2, $3::UUID)
+                 )
+               ORDER BY created_at DESC, id DESC
+               LIMIT $4",
+        )
+        .bind(status)
+        .bind(cursor_ts)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(Page::from_rows(rows, limit, |t| (t.created_at, t.id.0)))
     }
@@ -276,14 +277,14 @@ mod tests {
         }
 
         // First page of 3
-        let page1 = repo.list(None, 3).await.expect("list should succeed");
+        let page1 = repo.list(None, 3, None).await.expect("list should succeed");
         assert_eq!(page1.items.len(), 3);
         assert!(page1.has_more);
         assert!(page1.next_cursor.is_some());
 
         // Second page using cursor
         let page2 = repo
-            .list(page1.next_cursor.as_ref(), 3)
+            .list(page1.next_cursor.as_ref(), 3, None)
             .await
             .expect("list page 2 should succeed");
         assert_eq!(page2.items.len(), 2);
