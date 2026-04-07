@@ -7,6 +7,7 @@ pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod models;
 pub mod observability;
 pub mod policy;
 pub mod providers;

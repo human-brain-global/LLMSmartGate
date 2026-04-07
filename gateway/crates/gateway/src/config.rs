@@ -22,6 +22,12 @@ impl Secret {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    /// Create a Secret for testing purposes.
+    #[cfg(test)]
+    pub(crate) fn for_test(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
 }
 
 impl fmt::Debug for Secret {

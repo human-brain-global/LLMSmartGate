@@ -33,6 +33,20 @@ just dev-gateway     # Run gateway locally
 just dev-admin       # Run admin console locally
 ```
 
+## Reference Documents (`docs/`)
+| Doc ID | File | Purpose |
+|--------|------|---------|
+| PRD-001 | `docs/PRD-001_prd_detail.md` | Detailed product requirements, user stories, acceptance criteria |
+| PRD-000 | `docs/PRD-000_prd_original.md` | Original PRD (superseded by PRD-001) |
+| ARC-001 | `docs/ARC-001_architecture_technology_standards.md` | Architecture decisions, tech stack, standards |
+| HLD-001 | `docs/HLD-001_high_level_design.md` | High-level design: component interactions, data flow |
+| LLD-BE-001 | `docs/LLD-BE-001_backend_low_level_design.md` | Backend implementation: traits, structs, algorithms, SQL |
+| LLD-FE-001 | `docs/LLD-FE-001_frontend_low_level_design.md` | Frontend implementation: Svelte components, API client |
+| LLD-000 | `docs/LLD-000_erd_sql_openapi_original.md` | ERD, SQL schema, OpenAPI spec (original reference) |
+| TST-001 | `docs/TST-001_test_cases_checklist.md` | Test cases, acceptance checklists, coverage targets |
+
+**Read the relevant doc before implementing.** PRD-001 is the source of truth for requirements. LLD-BE-001 has Rust-level design details. LLD-000 has the SQL schema reference.
+
 ## Rules
 - Rust edition 2024, MSRV 1.85. thiserror in lib, anyhow in main/tests only. No `.unwrap()`.
 - No aws-lc-sys -- ring as rustls crypto provider.
@@ -42,7 +56,7 @@ just dev-admin       # Run admin console locally
 - Trunk-based dev, squash merge, short-lived branches.
 /
 ## Quality Checklist
-- [ ]**Code**: Clean Code standard
+- [ ] **Code**: Clean Code standard
 - [ ] **Perf**: no blocking I/O, no unnecessary clones, hot paths cached, benchmarked
 - [ ] **Security**: fail-safe, no secrets, parameterized SQL, auth on new endpoints, audit emitted
 - [ ] **Gateway**: fmt + clippy + tests pass, coverage >= 80% core, no unwrap/unsafe

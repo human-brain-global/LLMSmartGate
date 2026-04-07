@@ -23,7 +23,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Database
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring", "uuid", "chrono", "json", "migrate", "derive"] }
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring", "uuid", "chrono", "json", "macros", "migrate", "derive", "rust_decimal"] }
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
 
 # Redis / Valkey
 redis = { version = "1", features = ["aio", "tokio-comp"] }

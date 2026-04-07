@@ -14,8 +14,9 @@ use uuid::Uuid;
 macro_rules! define_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
         #[serde(transparent)]
+        #[sqlx(transparent)]
         pub struct $name(pub Uuid);
 
         impl $name {
@@ -82,6 +83,10 @@ define_id!(
     /// Unique identifier for an audit log entry.
     AuditEventId
 );
+define_id!(
+    /// Unique identifier for a pricing rule.
+    PricingRuleId
+);
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -100,7 +105,7 @@ pub enum Environment {
 /// Lifecycle status of a service account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "lowercase")]
-#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[sqlx(type_name = "service_account_status", rename_all = "lowercase")]
 pub enum ServiceAccountStatus {
     Active,
     Suspended,
@@ -110,7 +115,7 @@ pub enum ServiceAccountStatus {
 /// Lifecycle status of an API key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "lowercase")]
-#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[sqlx(type_name = "key_status", rename_all = "lowercase")]
 pub enum KeyStatus {
     Active,
     Rotating,
@@ -121,7 +126,7 @@ pub enum KeyStatus {
 /// Lifecycle status of a tenant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "lowercase")]
-#[sqlx(type_name = "text", rename_all = "lowercase")]
+#[sqlx(type_name = "tenant_status", rename_all = "lowercase")]
 pub enum TenantStatus {
     Active,
     Suspended,
@@ -129,15 +134,38 @@ pub enum TenantStatus {
 }
 
 /// Supported upstream LLM providers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "text", rename_all = "lowercase")]
 pub enum Provider {
     Openai,
     Anthropic,
     Gemini,
     #[serde(rename = "azure_openai")]
+    #[sqlx(rename = "azure_openai")]
     AzureOpenai,
     Vllm,
+}
+
+/// Budget period type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "budget_period_type", rename_all = "lowercase")]
+pub enum BudgetPeriodType {
+    Daily,
+    Monthly,
+    Custom,
+}
+
+/// Lifecycle status of a budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(type_name = "budget_status", rename_all = "lowercase")]
+pub enum BudgetStatus {
+    Active,
+    Exhausted,
+    Expired,
+    Disabled,
 }
 
 // ===========================================================================

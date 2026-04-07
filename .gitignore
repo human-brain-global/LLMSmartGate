@@ -25,6 +25,7 @@ sdk-python/**/*.egg-info/
 .agents/
 .claude/
 skills-lock.json
+.backlogmd
 
 # ── IDE ──
 .idea/

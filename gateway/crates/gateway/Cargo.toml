@@ -54,12 +54,14 @@ moka = { workspace = true }
 dotenvy = { workspace = true }
 config = { workspace = true }
 num_cpus = { workspace = true }
+rust_decimal = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
 assert-json-diff = { workspace = true }
 http-body-util = { workspace = true }
 proptest = { workspace = true }
+rust_decimal_macros = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 sqlx = { workspace = true }
 
