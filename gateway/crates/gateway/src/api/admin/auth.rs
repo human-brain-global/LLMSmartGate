@@ -38,7 +38,7 @@ impl AdminRole {
     fn from_db_str(s: &str) -> Result<Self, GatewayError> {
         serde_json::from_value::<Self>(serde_json::Value::String(s.to_owned())).map_err(|_| {
             tracing::warn!(role = %s, "unknown admin role in database");
-            GatewayError::auth("invalid_role", format!("unknown admin role: {s}"))
+            GatewayError::auth("invalid_role", "unrecognized admin role")
         })
     }
 }

@@ -363,6 +363,80 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../../migrations")]
+    async fn soft_delete_cascades_service_account_suspension(pool: PgPool) {
+        use crate::models::CreateServiceAccount;
+        use crate::storage::repositories::service_accounts::ServiceAccountRepo;
+        use crate::types::{Environment, ServiceAccountId, ServiceAccountStatus};
+
+        let tenant = create_test_tenant(&pool).await;
+        let sa_repo = ServiceAccountRepo::new(pool.clone());
+
+        // Create an active SA
+        let active_sa = sa_repo
+            .create(&CreateServiceAccount {
+                id: ServiceAccountId::new(),
+                tenant_id: tenant.id,
+                name: "Active SA".to_owned(),
+                slug: format!("active-sa-{}", uuid::Uuid::new_v4()),
+                environment: Environment::Dev,
+                description: None,
+                status: ServiceAccountStatus::Active,
+                default_policy_id: None,
+            })
+            .await
+            .expect("create active SA");
+
+        // Create a pre-suspended SA
+        let suspended_sa = sa_repo
+            .create(&CreateServiceAccount {
+                id: ServiceAccountId::new(),
+                tenant_id: tenant.id,
+                name: "Suspended SA".to_owned(),
+                slug: format!("suspended-sa-{}", uuid::Uuid::new_v4()),
+                environment: Environment::Dev,
+                description: None,
+                status: ServiceAccountStatus::Active,
+                default_policy_id: None,
+            })
+            .await
+            .expect("create suspended SA");
+        sa_repo
+            .suspend(tenant.id, suspended_sa.id)
+            .await
+            .expect("suspend SA");
+
+        // Soft-delete the tenant
+        let tenant_repo = TenantRepo::new(pool.clone());
+        let deleted = tenant_repo
+            .soft_delete(tenant.id)
+            .await
+            .expect("soft_delete");
+        assert_eq!(deleted.status, TenantStatus::Deleted);
+
+        // Active SA should now be suspended
+        let fetched_active = sa_repo
+            .get_by_id(tenant.id, active_sa.id)
+            .await
+            .expect("get active SA");
+        assert_eq!(
+            fetched_active.status,
+            ServiceAccountStatus::Suspended,
+            "active SA should be suspended after tenant soft_delete"
+        );
+
+        // Already-suspended SA should remain suspended
+        let fetched_suspended = sa_repo
+            .get_by_id(tenant.id, suspended_sa.id)
+            .await
+            .expect("get suspended SA");
+        assert_eq!(
+            fetched_suspended.status,
+            ServiceAccountStatus::Suspended,
+            "already-suspended SA should remain suspended"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
     async fn get_nonexistent_not_found(pool: PgPool) {
         let repo = TenantRepo::new(pool);
         let result = repo.get_by_id(TenantId::new()).await;

@@ -142,6 +142,45 @@ pub(crate) fn validate_name(name: &str) -> Result<(), GatewayError> {
     Ok(())
 }
 
+/// Validate that a model identifier (model_alias or provider_model_name)
+/// conforms to a safe character set for use in cache keys and routing.
+///
+/// - 1-128 characters
+/// - Alphanumeric, hyphens, underscores, dots, colons, and forward slashes only
+///
+/// # Errors
+///
+/// Returns `GatewayError::Validation` if the identifier is invalid.
+pub(crate) fn validate_model_identifier(value: &str, field: &str) -> Result<(), GatewayError> {
+    if value.is_empty() {
+        return Err(GatewayError::validation(
+            format!("invalid_{field}"),
+            format!("{field} must not be empty"),
+        ));
+    }
+    if value.len() > 128 {
+        return Err(GatewayError::validation(
+            format!("invalid_{field}"),
+            format!(
+                "{field} must be 128 characters or fewer, got {}",
+                value.len()
+            ),
+        ));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'))
+    {
+        return Err(GatewayError::validation(
+            format!("invalid_{field}"),
+            format!(
+                "{field} must contain only alphanumeric characters, hyphens, underscores, dots, colons, and slashes"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate that a key ID conforms to the required format:
 /// - 1-128 characters
 /// - Alphanumeric, hyphens, and underscores only
@@ -244,6 +283,41 @@ mod tests {
         assert!(validate_name("name\x00with_null").is_err());
         assert!(validate_name("name\nwith_newline").is_err());
         assert!(validate_name("name\twith_tab").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_model_identifier
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_model_identifier_accepts_valid() {
+        assert!(validate_model_identifier("gpt-4-turbo", "model_alias").is_ok());
+        assert!(validate_model_identifier("claude-3.5-sonnet", "model_alias").is_ok());
+        assert!(validate_model_identifier("meta/llama-3:8b", "model_alias").is_ok());
+        assert!(validate_model_identifier("gpt_4", "model_alias").is_ok());
+        assert!(validate_model_identifier(&"m".repeat(128), "model_alias").is_ok());
+    }
+
+    #[test]
+    fn validate_model_identifier_rejects_empty() {
+        assert!(validate_model_identifier("", "model_alias").is_err());
+    }
+
+    #[test]
+    fn validate_model_identifier_rejects_too_long() {
+        assert!(validate_model_identifier(&"m".repeat(129), "model_alias").is_err());
+    }
+
+    #[test]
+    fn validate_model_identifier_rejects_spaces() {
+        assert!(validate_model_identifier("gpt 4 turbo", "model_alias").is_err());
+    }
+
+    #[test]
+    fn validate_model_identifier_rejects_special_chars() {
+        assert!(validate_model_identifier("gpt-4@turbo", "model_alias").is_err());
+        assert!(validate_model_identifier("model#1", "model_alias").is_err());
+        assert!(validate_model_identifier("model\nnewline", "model_alias").is_err());
     }
 
     // -----------------------------------------------------------------------

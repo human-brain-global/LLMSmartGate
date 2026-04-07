@@ -15,7 +15,7 @@ use crate::types::{RouteId, TenantId};
 
 use super::{
     AdminContext, emit_audit, map_storage_error, parse_enum_str, require_admin_role,
-    validate_limit, validate_name,
+    validate_limit, validate_model_identifier,
 };
 
 // ---------------------------------------------------------------------------
@@ -87,8 +87,8 @@ pub async fn create_route(
     require_admin_role(&admin_ctx)?;
     validate_provider(&body.provider)?;
 
-    validate_name(&body.model_alias)?;
-    validate_name(&body.provider_model_name)?;
+    validate_model_identifier(&body.model_alias, "model_alias")?;
+    validate_model_identifier(&body.provider_model_name, "provider_model_name")?;
 
     let pool = state.require_db()?;
     let repo = RouteRepo::new(pool.clone());
@@ -195,10 +195,10 @@ pub async fn update_route(
         validate_provider(provider)?;
     }
     if let Some(ref model_alias) = body.model_alias {
-        validate_name(model_alias)?;
+        validate_model_identifier(model_alias, "model_alias")?;
     }
     if let Some(ref provider_model_name) = body.provider_model_name {
-        validate_name(provider_model_name)?;
+        validate_model_identifier(provider_model_name, "provider_model_name")?;
     }
 
     let pool = state.require_db()?;

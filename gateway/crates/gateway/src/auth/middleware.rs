@@ -79,23 +79,32 @@ fn extract_header(headers: &HeaderMap, name: &str) -> Result<String, GatewayErro
 // ---------------------------------------------------------------------------
 
 /// Look up a key via the 3-tier cache, verify its status and expiry.
+///
+/// All failure paths return a single opaque error to prevent key enumeration
+/// and status oracle attacks. Details are logged at WARN for observability.
 async fn verify_key(
     key_store: &KeyStore,
     key_id: &str,
 ) -> Result<Arc<ServiceAccountKey>, GatewayError> {
-    let key = key_store.get_by_key_id(key_id).await?;
+    let key = key_store.get_by_key_id(key_id).await.map_err(|e| {
+        tracing::warn!(key_id = %key_id, error = %e, "auth: key lookup failed");
+        GatewayError::auth("authentication_failed", "authentication denied")
+    })?;
 
     match key.status {
         KeyStatus::Revoked => {
             tracing::warn!(key_id = %key_id, "auth: revoked key used");
             return Err(GatewayError::auth(
-                "key_revoked",
-                "this key has been revoked",
+                "authentication_failed",
+                "authentication denied",
             ));
         }
         KeyStatus::Expired => {
             tracing::warn!(key_id = %key_id, "auth: expired key used");
-            return Err(GatewayError::auth("key_expired", "this key has expired"));
+            return Err(GatewayError::auth(
+                "authentication_failed",
+                "authentication denied",
+            ));
         }
         KeyStatus::Active | KeyStatus::Rotating => {}
     }
@@ -103,7 +112,10 @@ async fn verify_key(
     if let Some(expires_at) = key.expires_at {
         if expires_at < chrono::Utc::now() {
             tracing::warn!(key_id = %key_id, expires_at = %expires_at, "auth: key past expiry date");
-            return Err(GatewayError::auth("key_expired", "this key has expired"));
+            return Err(GatewayError::auth(
+                "authentication_failed",
+                "authentication denied",
+            ));
         }
     }
 
@@ -121,7 +133,7 @@ async fn verify_service_account(
         .await
         .map_err(|e| {
             tracing::warn!(service_account_id = %key.service_account_id, error = %e, "auth: service account lookup failed");
-            GatewayError::auth("unknown_service_account", "service account not found")
+            GatewayError::auth("authentication_failed", "authentication denied")
         })?;
 
     if sa.status != ServiceAccountStatus::Active {
@@ -131,7 +143,7 @@ async fn verify_service_account(
             "auth: inactive service account"
         );
         return Err(GatewayError::auth(
-            "service_account_inactive",
+            "authentication_failed",
             "authentication denied",
         ));
     }
@@ -144,7 +156,7 @@ async fn verify_service_account(
             "auth: inactive tenant"
         );
         return Err(GatewayError::auth(
-            "tenant_inactive",
+            "authentication_failed",
             "authentication denied",
         ));
     }
@@ -203,8 +215,8 @@ pub async fn auth_middleware(
             "auth: service account ID mismatch"
         );
         return Err(GatewayError::auth(
-            "service_account_mismatch",
-            "x-service-account-id header does not match the key's service account",
+            "authentication_failed",
+            "authentication denied",
         ));
     }
 

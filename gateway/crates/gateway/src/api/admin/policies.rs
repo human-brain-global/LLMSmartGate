@@ -347,7 +347,7 @@ pub async fn delete_binding(
         "policy_binding.deleted",
         "policy_binding",
         format!("{sa_id}/{policy_id}"),
-        serde_json::json!({"sa_id": sa_id.to_string(), "policy_id": policy_id.to_string()}),
+        serde_json::json!({"service_account_id": sa_id.to_string(), "policy_id": policy_id.to_string()}),
     );
 
     Ok(StatusCode::NO_CONTENT)

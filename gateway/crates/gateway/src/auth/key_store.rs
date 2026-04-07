@@ -1,8 +1,9 @@
 //! Key store with 3-tier caching: moka L1 (in-process) → Redis L2 → PostgreSQL L3.
 //!
-//! Provides fast key lookups for the auth hot path. Cache invalidation
-//! happens via TTL expiry (no active invalidation needed for key revocation
-//! since revoked keys are checked by status after retrieval).
+//! Provides fast key lookups for the auth hot path. Cache invalidation uses
+//! TTL expiry as a baseline. Active invalidation via [`KeyStore::invalidate`]
+//! is called on key revocation to prevent compromised or revoked keys from
+//! authenticating during the remaining TTL window.
 
 use std::sync::Arc;
 use std::time::Duration;

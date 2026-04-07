@@ -6,7 +6,9 @@ use crate::models::{
     CreateServiceAccount, Cursor, Page, ServiceAccount, UpdateServiceAccount, clamp_limit,
 };
 use crate::storage::StorageError;
-use crate::types::{ServiceAccountId, ServiceAccountStatus, TenantId, TenantStatus};
+use crate::types::{
+    Environment, PolicyId, ServiceAccountId, ServiceAccountStatus, TenantId, TenantStatus,
+};
 
 /// Service account with its parent tenant's status, used by the auth hot path
 /// to avoid a separate tenant lookup.
@@ -16,10 +18,10 @@ pub struct ServiceAccountWithTenantStatus {
     pub tenant_id: TenantId,
     pub name: String,
     pub slug: String,
-    pub environment: crate::types::Environment,
+    pub environment: Environment,
     pub description: Option<String>,
     pub status: ServiceAccountStatus,
-    pub default_policy_id: Option<crate::types::PolicyId>,
+    pub default_policy_id: Option<PolicyId>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub tenant_status: TenantStatus,
@@ -200,30 +202,21 @@ impl ServiceAccountRepo {
         id: ServiceAccountId,
         input: &UpdateServiceAccount,
     ) -> Result<ServiceAccount, StorageError> {
-        // Read-before-write is intentional: we merge Optional fields with
-        // existing values before the UPDATE (the SQL does not use COALESCE).
-        let existing = self.get_by_id(tenant_id, id).await?;
-
-        let name = input.name.as_deref().unwrap_or(&existing.name);
-        let description = input
-            .description
-            .as_deref()
-            .or(existing.description.as_deref());
-
         sqlx::query_as::<_, ServiceAccount>(
             r"UPDATE service_accounts
-               SET name = $1, description = $2
+               SET name        = COALESCE($1, name),
+                   description = COALESCE($2, description)
                WHERE id = $3 AND tenant_id = $4
                RETURNING id, tenant_id, name, slug, environment, description,
                          status, default_policy_id, created_at, updated_at",
         )
-        .bind(name)
-        .bind(description)
+        .bind(input.name.as_deref())
+        .bind(input.description.as_deref())
         .bind(id)
         .bind(tenant_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(StorageError::from)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StorageError::not_found("service_account", "id", id))
     }
 
     /// Suspend a service account.
@@ -421,6 +414,57 @@ mod tests {
         assert!(
             page.items.is_empty(),
             "tenant B should have no service accounts"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn get_with_tenant_status_active(pool: PgPool) {
+        let tenant = create_test_tenant(&pool).await;
+        let sa = create_test_service_account(&pool, tenant.id).await;
+
+        let repo = ServiceAccountRepo::new(pool.clone());
+        let result = repo
+            .get_with_tenant_status(sa.id)
+            .await
+            .expect("should find SA with tenant status");
+
+        assert_eq!(result.id, sa.id);
+        assert_eq!(result.tenant_id, tenant.id);
+        assert_eq!(result.status, ServiceAccountStatus::Active);
+        assert_eq!(result.tenant_status, crate::types::TenantStatus::Active);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn get_with_tenant_status_deleted_tenant(pool: PgPool) {
+        use crate::storage::repositories::tenants::TenantRepo;
+
+        let tenant = create_test_tenant(&pool).await;
+        let sa = create_test_service_account(&pool, tenant.id).await;
+
+        // Soft-delete the tenant (this also suspends the SA)
+        let tenant_repo = TenantRepo::new(pool.clone());
+        tenant_repo
+            .soft_delete(tenant.id)
+            .await
+            .expect("soft_delete");
+
+        let repo = ServiceAccountRepo::new(pool.clone());
+        let result = repo
+            .get_with_tenant_status(sa.id)
+            .await
+            .expect("should find SA even after tenant soft_delete");
+
+        assert_eq!(result.tenant_status, crate::types::TenantStatus::Deleted);
+        assert_eq!(result.status, ServiceAccountStatus::Suspended);
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn get_with_tenant_status_not_found(pool: PgPool) {
+        let repo = ServiceAccountRepo::new(pool.clone());
+        let result = repo.get_with_tenant_status(ServiceAccountId::new()).await;
+        assert!(
+            matches!(result, Err(StorageError::NotFound { .. })),
+            "expected NotFound, got {result:?}"
         );
     }
 }
