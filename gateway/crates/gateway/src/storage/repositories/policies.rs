@@ -76,7 +76,7 @@ impl PolicyRepo {
 
     /// List policies for a tenant with cursor-based pagination.
     ///
-    /// Results are ordered by `(created_at, id)` ascending.
+    /// Results are ordered by `(created_at, id)` descending (newest first).
     ///
     /// # Errors
     ///
@@ -95,8 +95,8 @@ impl PolicyRepo {
                 r"
                 SELECT * FROM policies
                 WHERE tenant_id = $1
-                  AND (created_at, id) > ($2, $3)
-                ORDER BY created_at ASC, id ASC
+                  AND (created_at, id) < ($2, $3)
+                ORDER BY created_at DESC, id DESC
                 LIMIT $4
                 ",
             )
@@ -111,7 +111,7 @@ impl PolicyRepo {
                 r"
                 SELECT * FROM policies
                 WHERE tenant_id = $1
-                ORDER BY created_at ASC, id ASC
+                ORDER BY created_at DESC, id DESC
                 LIMIT $2
                 ",
             )

@@ -12,7 +12,10 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::{AdminContext, map_storage_error, require_admin_role, validate_slug};
+use super::{
+    AdminContext, emit_audit, map_storage_error, parse_enum_str, require_admin_role,
+    validate_limit, validate_name, validate_slug,
+};
 use crate::error::GatewayError;
 use crate::models::{CreateTenant, Cursor, UpdateTenant};
 use crate::server::AppState;
@@ -63,6 +66,7 @@ pub async fn create_tenant(
     Json(body): Json<CreateTenantRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     require_admin_role(&admin_ctx)?;
+    validate_name(&body.name)?;
     validate_slug(&body.slug)?;
 
     let pool = state.require_db()?;
@@ -78,24 +82,16 @@ pub async fn create_tenant(
 
     let tenant = repo.create(&input).await.map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let tenant_id = tenant.id;
-    let target_id = tenant.id.0.to_string();
-    tokio::spawn(async move {
-        let repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: Some(tenant_id),
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "tenant.created".to_owned(),
-                target_type: "tenant".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, tenant_id = %tenant.id, action = "tenant.created", "admin operation");
+    emit_audit(
+        pool,
+        Some(tenant.id),
+        admin_ctx.admin_id,
+        "tenant.created",
+        "tenant",
+        tenant.id.0.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok((StatusCode::CREATED, Json(tenant)))
 }
@@ -107,28 +103,19 @@ pub async fn create_tenant(
 /// Returns `GatewayError` on database failure or invalid cursor.
 pub async fn list_tenants(
     State(state): State<AppState>,
-    Extension(_admin_ctx): Extension<AdminContext>,
+    Extension(admin_ctx): Extension<AdminContext>,
     Query(query): Query<ListTenantsQuery>,
 ) -> Result<impl IntoResponse, GatewayError> {
     let pool = state.require_db()?;
     let repo = TenantRepo::new(pool.clone());
 
     let cursor = query.cursor.map(Cursor);
-    let limit = query.limit.unwrap_or(50);
+    let limit = validate_limit(query.limit)?;
 
     let status = query
         .status
         .as_deref()
-        .map(|s| {
-            serde_json::from_value::<TenantStatus>(serde_json::Value::String(s.to_owned())).map_err(
-                |_| {
-                    GatewayError::validation(
-                        "invalid_status",
-                        format!("status must be one of: active, suspended, deleted; got: {s}"),
-                    )
-                },
-            )
-        })
+        .map(|s| parse_enum_str::<TenantStatus>(s, "status", "active, suspended, deleted"))
         .transpose()?;
 
     let page = repo
@@ -136,6 +123,7 @@ pub async fn list_tenants(
         .await
         .map_err(map_storage_error)?;
 
+    tracing::debug!(admin_id = %admin_ctx.admin_id, action = "tenant.list", "admin operation");
     Ok(Json(page))
 }
 
@@ -146,7 +134,7 @@ pub async fn list_tenants(
 /// Returns `GatewayError` if the tenant is not found or on database failure.
 pub async fn get_tenant(
     State(state): State<AppState>,
-    Extension(_admin_ctx): Extension<AdminContext>,
+    Extension(admin_ctx): Extension<AdminContext>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, GatewayError> {
     let pool = state.require_db()?;
@@ -157,6 +145,7 @@ pub async fn get_tenant(
         .await
         .map_err(map_storage_error)?;
 
+    tracing::debug!(admin_id = %admin_ctx.admin_id, tenant_id = %id, action = "tenant.get", "admin operation");
     Ok(Json(tenant))
 }
 
@@ -175,6 +164,9 @@ pub async fn update_tenant(
     Json(body): Json<UpdateTenantRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     require_admin_role(&admin_ctx)?;
+    if let Some(ref name) = body.name {
+        validate_name(name)?;
+    }
 
     let pool = state.require_db()?;
     let repo = TenantRepo::new(pool.clone());
@@ -191,24 +183,16 @@ pub async fn update_tenant(
         .await
         .map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let tenant_id = tenant.id;
-    let target_id = tenant.id.0.to_string();
-    tokio::spawn(async move {
-        let repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: Some(tenant_id),
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "tenant.updated".to_owned(),
-                target_type: "tenant".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, tenant_id = %id, action = "tenant.updated", "admin operation");
+    emit_audit(
+        pool,
+        Some(tenant.id),
+        admin_ctx.admin_id,
+        "tenant.updated",
+        "tenant",
+        tenant.id.0.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok(Json(tenant))
 }
@@ -236,24 +220,16 @@ pub async fn delete_tenant(
         .await
         .map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let tenant_id = tenant.id;
-    let target_id = tenant.id.0.to_string();
-    tokio::spawn(async move {
-        let repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: Some(tenant_id),
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "tenant.deleted".to_owned(),
-                target_type: "tenant".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, tenant_id = %id, action = "tenant.deleted", "admin operation");
+    emit_audit(
+        pool,
+        Some(tenant.id),
+        admin_ctx.admin_id,
+        "tenant.deleted",
+        "tenant",
+        tenant.id.0.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok(Json(tenant))
 }

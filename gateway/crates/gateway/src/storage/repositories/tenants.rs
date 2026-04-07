@@ -113,32 +113,34 @@ impl TenantRepo {
         Ok(Page::from_rows(rows, limit, |t| (t.created_at, t.id.0)))
     }
 
-    /// Update mutable fields on a tenant.
+    /// Update mutable fields on a tenant. Only non-`None` fields are applied.
+    ///
+    /// Uses a single `COALESCE` query to avoid TOCTOU races.
     ///
     /// # Errors
     ///
     /// Returns [`StorageError::NotFound`] if the tenant does not exist,
     /// or [`StorageError::Database`] on connection / query failure.
     pub async fn update(&self, id: TenantId, input: &UpdateTenant) -> Result<Tenant, StorageError> {
-        // Read-before-write is intentional: we merge Optional fields with
-        // existing values before the UPDATE (the SQL does not use COALESCE).
-        let existing = self.get_by_id(id).await?;
-
-        let name = input.name.as_deref().unwrap_or(&existing.name);
-        let metadata = input.metadata.as_ref().unwrap_or(&existing.metadata);
-
         sqlx::query_as::<_, Tenant>(
             r"UPDATE tenants
-               SET name = $1, metadata = $2
+               SET name     = COALESCE($1, name),
+                   metadata = COALESCE($2, metadata)
                WHERE id = $3
                RETURNING id, name, slug, status, metadata, created_at, updated_at",
         )
-        .bind(name)
-        .bind(metadata)
+        .bind(input.name.as_deref())
+        .bind(input.metadata.as_ref())
         .bind(id)
         .fetch_one(&self.pool)
         .await
-        .map_err(StorageError::from)
+        .map_err(|e| {
+            if matches!(&e, sqlx::Error::RowNotFound) {
+                StorageError::not_found("tenant", "id", id)
+            } else {
+                StorageError::from(e)
+            }
+        })
     }
 
     /// Soft-delete a tenant by setting status to `deleted`.
@@ -146,8 +148,21 @@ impl TenantRepo {
     /// # Errors
     ///
     /// Returns [`StorageError::NotFound`] if the tenant does not exist.
+    ///
+    /// Also suspends all active service accounts belonging to the tenant
+    /// to prevent further data-plane authentication.
     pub async fn soft_delete(&self, id: TenantId) -> Result<Tenant, StorageError> {
-        sqlx::query_as::<_, Tenant>(
+        let mut tx = self.pool.begin().await?;
+
+        // Cascade: suspend all non-terminal service accounts for this tenant.
+        sqlx::query(
+            "UPDATE service_accounts SET status = 'suspended' WHERE tenant_id = $1 AND status NOT IN ('suspended', 'deleted')",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+        let tenant = sqlx::query_as::<_, Tenant>(
             r"UPDATE tenants
                SET status = $1
                WHERE id = $2
@@ -155,9 +170,12 @@ impl TenantRepo {
         )
         .bind(TenantStatus::Deleted)
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?
-        .ok_or_else(|| StorageError::not_found("tenant", "id", id))
+        .ok_or_else(|| StorageError::not_found("tenant", "id", id))?;
+
+        tx.commit().await?;
+        Ok(tenant)
     }
 }
 

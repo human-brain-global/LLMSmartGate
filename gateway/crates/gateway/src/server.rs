@@ -106,8 +106,7 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::middleware::auth_middleware,
-        ))
-        .layer(CorsLayer::permissive());
+        ));
 
     // Admin routes -- protected by admin auth middleware (bearer token + bcrypt)
     let admin = Router::new()
@@ -402,6 +401,32 @@ mod tests {
     // ---------------------------------------------------------------
     // CORS
     // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn data_plane_no_cors_headers_on_preflight() {
+        let app = test_router();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/v1/models")
+                    .header("origin", "http://example.com")
+                    .header("access-control-request-method", "GET")
+                    .body(Body::empty())
+                    .expect("request build"),
+            )
+            .await
+            .expect("response");
+
+        // Data plane should not have permissive CORS
+        assert!(
+            !response
+                .headers()
+                .contains_key("access-control-allow-origin"),
+            "data plane should not have permissive CORS headers"
+        );
+    }
 
     #[tokio::test]
     async fn cors_headers_present_on_response() {

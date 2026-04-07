@@ -36,17 +36,10 @@ impl AdminRole {
     ///
     /// Returns `GatewayError::Auth` if the role string is not recognised.
     fn from_db_str(s: &str) -> Result<Self, GatewayError> {
-        match s {
-            "admin" => Ok(Self::Admin),
-            "viewer" => Ok(Self::Viewer),
-            other => {
-                tracing::warn!(role = %other, "unknown admin role in database");
-                Err(GatewayError::auth(
-                    "invalid_role",
-                    format!("unknown admin role: {other}"),
-                ))
-            }
-        }
+        serde_json::from_value::<Self>(serde_json::Value::String(s.to_owned())).map_err(|_| {
+            tracing::warn!(role = %s, "unknown admin role in database");
+            GatewayError::auth("invalid_role", format!("unknown admin role: {s}"))
+        })
     }
 }
 
@@ -125,7 +118,10 @@ pub async fn admin_auth_middleware(
 
     let pool = state.require_db()?;
 
-    // Try cache first, fall back to DB
+    // Try cache first, fall back to DB.
+    // NOTE: The admin key cache has a ~30s TTL. Revoked keys remain valid until
+    // the cache entry expires. When admin key create/revoke endpoints are added,
+    // they MUST call `admin_key_cache.invalidate(()).await` to flush stale entries.
     let keys = if let Some(ref cache) = state.admin_key_cache {
         match cache
             .try_get_with((), async {
@@ -159,11 +155,14 @@ pub async fn admin_auth_middleware(
         ));
     }
 
-    // Verify the provided token against each key's bcrypt hash.
+    // Verify the provided token against ALL keys' bcrypt hashes to prevent
+    // timing side-channels that leak which key slot matched.
     // bcrypt::verify is CPU-bound, so we use spawn_blocking.
+    // TODO: For large key sets, add key_prefix column for O(1) lookup.
     let mut matched_key = None;
+    let token_owned = token.to_owned();
     for key in &keys {
-        let provided = token.to_owned();
+        let provided = token_owned.clone();
         let hash = key.key_hash.clone();
         let is_match = tokio::task::spawn_blocking(move || bcrypt::verify(provided, &hash))
             .await
@@ -176,9 +175,8 @@ pub async fn admin_auth_middleware(
                 GatewayError::auth("internal_error", "authentication verification failed")
             })?;
 
-        if is_match {
+        if is_match && matched_key.is_none() {
             matched_key = Some(key);
-            break;
         }
     }
 

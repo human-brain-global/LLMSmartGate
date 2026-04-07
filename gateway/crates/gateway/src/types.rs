@@ -133,6 +133,17 @@ pub enum KeyStatus {
     Expired,
 }
 
+impl fmt::Display for KeyStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Active => write!(f, "active"),
+            Self::Rotating => write!(f, "rotating"),
+            Self::Revoked => write!(f, "revoked"),
+            Self::Expired => write!(f, "expired"),
+        }
+    }
+}
+
 /// Lifecycle status of a tenant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "lowercase")]
@@ -374,6 +385,14 @@ mod tests {
         let json = serde_json::to_string(&Provider::AzureOpenai).expect("serialize");
         let p: Provider = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(p, Provider::AzureOpenai);
+    }
+
+    #[test]
+    fn key_status_display_matches_serde() {
+        assert_eq!(KeyStatus::Active.to_string(), "active");
+        assert_eq!(KeyStatus::Rotating.to_string(), "rotating");
+        assert_eq!(KeyStatus::Revoked.to_string(), "revoked");
+        assert_eq!(KeyStatus::Expired.to_string(), "expired");
     }
 
     #[test]

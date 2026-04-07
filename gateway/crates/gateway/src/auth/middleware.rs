@@ -19,12 +19,14 @@ use crate::auth::key_store::KeyStore;
 use crate::auth::nonce as nonce_mod;
 use crate::auth::verifier;
 use crate::error::GatewayError;
-use crate::models::{ServiceAccount, ServiceAccountKey};
+use crate::models::ServiceAccountKey;
 use crate::server::AppState;
 use crate::storage::redis::RedisClient;
 use crate::storage::repositories::keys::KeyRepo;
-use crate::storage::repositories::service_accounts::ServiceAccountRepo;
-use crate::types::{KeyStatus, ServiceAccountStatus};
+use crate::storage::repositories::service_accounts::{
+    ServiceAccountRepo, ServiceAccountWithTenantStatus,
+};
+use crate::types::{KeyStatus, ServiceAccountStatus, TenantStatus};
 
 // ---------------------------------------------------------------------------
 // Header extraction
@@ -108,13 +110,14 @@ async fn verify_key(
     Ok(key)
 }
 
-/// Look up the service account (unscoped) and verify it is active.
+/// Look up the service account with its tenant status in a single query
+/// and verify both are active.
 async fn verify_service_account(
     sa_repo: &ServiceAccountRepo,
     key: &ServiceAccountKey,
-) -> Result<ServiceAccount, GatewayError> {
+) -> Result<ServiceAccountWithTenantStatus, GatewayError> {
     let sa = sa_repo
-        .get_by_id_unscoped(key.service_account_id)
+        .get_with_tenant_status(key.service_account_id)
         .await
         .map_err(|e| {
             tracing::warn!(service_account_id = %key.service_account_id, error = %e, "auth: service account lookup failed");
@@ -128,8 +131,21 @@ async fn verify_service_account(
             "auth: inactive service account"
         );
         return Err(GatewayError::auth(
-            "service_account_suspended",
-            format!("service account '{}' is {}", sa.name, sa.status),
+            "service_account_inactive",
+            "authentication denied",
+        ));
+    }
+
+    // Verify the parent tenant is active -- prevents authentication after tenant deletion.
+    if sa.tenant_status != TenantStatus::Active {
+        tracing::warn!(
+            tenant_id = %sa.tenant_id,
+            status = ?sa.tenant_status,
+            "auth: inactive tenant"
+        );
+        return Err(GatewayError::auth(
+            "tenant_inactive",
+            "authentication denied",
         ));
     }
 
@@ -172,9 +188,25 @@ pub async fn auth_middleware(
     // 4. Look up key (3-tier cache) and verify status
     let key = verify_key(state.require_key_store()?, &h.key_id).await?;
 
-    // 5. Look up service account and verify status
+    // 5. Look up service account + tenant status in a single query
     let db = state.require_db()?;
     let sa = verify_service_account(&ServiceAccountRepo::new(db.clone()), &key).await?;
+
+    // 5b. Validate claimed service account ID matches the verified key owner.
+    // Without this check an attacker with a valid key for SA "A" could send
+    // `x-service-account-id: B`, scoping the nonce replay check to a
+    // different namespace and bypassing replay protection.
+    if h.sa_id_str != sa.id.0.to_string() {
+        tracing::warn!(
+            claimed = %h.sa_id_str,
+            actual = %sa.id,
+            "auth: service account ID mismatch"
+        );
+        return Err(GatewayError::auth(
+            "service_account_mismatch",
+            "x-service-account-id header does not match the key's service account",
+        ));
+    }
 
     // 6. Verify Ed25519 signature
     let public_key = verifier::parse_public_key(&key.public_key_pem)?;
@@ -198,7 +230,7 @@ pub async fn auth_middleware(
     let redis_client = RedisClient::new(state.require_redis()?.clone());
     nonce_mod::check_nonce(
         &redis_client,
-        &h.sa_id_str,
+        &sa.id.0.to_string(),
         &h.nonce,
         state.config.auth.timestamp_skew_secs,
     )

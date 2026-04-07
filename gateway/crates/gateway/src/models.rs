@@ -8,9 +8,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::types::{
-    AuditEventId, BudgetId, BudgetPeriodType, BudgetStatus, Environment, KeyId, KeyStatus,
-    PolicyId, Provider, RouteId, ServiceAccountId, ServiceAccountStatus, TenantId, TenantStatus,
-    UsageEventId,
+    BudgetId, BudgetPeriodType, BudgetStatus, Environment, KeyId, KeyStatus, PolicyId, Provider,
+    RouteId, ServiceAccountId, ServiceAccountStatus, TenantId, TenantStatus, UsageEventId,
 };
 
 // ===========================================================================
@@ -29,13 +28,18 @@ struct CursorPayload {
 
 impl Cursor {
     /// Encode a `(created_at, id)` pair into an opaque cursor string.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `CursorPayload` serialization fails (should never happen as
+    /// the payload contains only a string and a UUID).
     pub fn encode(created_at: DateTime<Utc>, id: Uuid) -> Self {
         let payload = CursorPayload {
             ts: created_at.to_rfc3339(),
             id,
         };
-        // serde_json::to_vec cannot fail for this simple struct.
-        let json = serde_json::to_vec(&payload).unwrap_or_default();
+        let json = serde_json::to_vec(&payload)
+            .expect("CursorPayload contains only string/uuid fields and cannot fail serialization");
         Self(URL_SAFE_NO_PAD.encode(json))
     }
 
@@ -406,65 +410,6 @@ pub struct CreateUsageEvent {
     pub retry_count: i32,
     pub final_status: String,
     pub is_streaming: bool,
-}
-
-// ===========================================================================
-// Audit Event
-// ===========================================================================
-
-/// Row struct for the `audit_events` table.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct AuditEvent {
-    pub id: AuditEventId,
-    pub tenant_id: Option<TenantId>,
-    pub actor_type: String,
-    pub actor_id: String,
-    pub action: String,
-    pub target_type: String,
-    pub target_id: String,
-    pub metadata_json: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-}
-
-/// Input for creating a new audit event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateAuditEvent {
-    pub id: AuditEventId,
-    pub tenant_id: Option<TenantId>,
-    pub actor_type: String,
-    pub actor_id: String,
-    pub action: String,
-    pub target_type: String,
-    pub target_id: String,
-    pub metadata_json: serde_json::Value,
-}
-
-// ===========================================================================
-// Pricing Rule
-// ===========================================================================
-
-/// Row struct for the `pricing_rules` table.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct PricingRule {
-    pub id: Uuid,
-    pub provider: Provider,
-    pub model_name: String,
-    pub input_price_per_1k: Decimal,
-    pub output_price_per_1k: Decimal,
-    pub effective_from: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Input for creating a new pricing rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreatePricingRule {
-    pub id: Uuid,
-    pub provider: Provider,
-    pub model_name: String,
-    pub input_price_per_1k: Decimal,
-    pub output_price_per_1k: Decimal,
-    pub effective_from: DateTime<Utc>,
 }
 
 // ===========================================================================

@@ -157,21 +157,33 @@ impl GatewayError {
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
         let status = self.status_code();
+        let retry_after = match &self {
+            Self::RateLimit { retry_after, .. } => *retry_after,
+            _ => None,
+        };
         let body = self.to_error_response();
 
         // `serde_json::to_vec` only fails on non-string map keys or
         // unsupported types, neither of which apply here.  Fall back to a
         // plain-text 500 if serialisation somehow fails.
         match serde_json::to_vec(&body) {
-            Ok(bytes) => (
-                status,
-                [(
-                    axum::http::header::CONTENT_TYPE,
-                    axum::http::HeaderValue::from_static("application/json"),
-                )],
-                bytes,
-            )
-                .into_response(),
+            Ok(bytes) => {
+                let mut response = (
+                    status,
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        axum::http::HeaderValue::from_static("application/json"),
+                    )],
+                    bytes,
+                )
+                    .into_response();
+                if let Some(secs) = retry_after {
+                    if let Ok(val) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+                        response.headers_mut().insert("retry-after", val);
+                    }
+                }
+                response
+            }
             Err(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error: failed to serialize error response",
@@ -409,6 +421,29 @@ mod tests {
         let err = GatewayError::rate_limit("rate_limited", "too many requests", Some(60));
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn into_response_rate_limit_includes_retry_after_header() {
+        let err = GatewayError::rate_limit("rate_limited", "slow down", Some(30));
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry = response
+            .headers()
+            .get("retry-after")
+            .expect("retry-after header must be present");
+        assert_eq!(retry.to_str().expect("valid utf-8"), "30");
+    }
+
+    #[tokio::test]
+    async fn into_response_rate_limit_no_retry_after_when_none() {
+        let err = GatewayError::rate_limit("rate_limited", "slow down", None);
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            response.headers().get("retry-after").is_none(),
+            "retry-after should not be present when None"
+        );
     }
 
     // -----------------------------------------------------------------------

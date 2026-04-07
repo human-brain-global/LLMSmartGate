@@ -13,7 +13,9 @@ use crate::server::AppState;
 use crate::storage::repositories::policies::PolicyRepo;
 use crate::types::{PolicyId, ServiceAccountId, TenantId};
 
-use super::{AdminContext, map_storage_error, require_admin_role};
+use super::{
+    AdminContext, emit_audit, map_storage_error, require_admin_role, validate_limit, validate_name,
+};
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -82,6 +84,7 @@ pub async fn create_policy(
     Json(body): Json<CreatePolicyRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     require_admin_role(&admin_ctx)?;
+    validate_name(&body.name)?;
 
     let pool = state.require_db()?;
     let repo = PolicyRepo::new(pool.clone());
@@ -104,24 +107,16 @@ pub async fn create_policy(
 
     let policy = repo.create(&input).await.map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let policy_tenant_id = policy.tenant_id;
-    let target_id = policy.id.0.to_string();
-    tokio::spawn(async move {
-        let audit_repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = audit_repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: Some(policy_tenant_id),
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "policy.created".to_owned(),
-                target_type: "policy".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, policy_id = %policy.id, action = "policy.created", "admin operation");
+    emit_audit(
+        pool,
+        Some(policy.tenant_id),
+        admin_ctx.admin_id,
+        "policy.created",
+        "policy",
+        policy.id.0.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok((StatusCode::CREATED, Json(policy)))
 }
@@ -132,7 +127,7 @@ pub async fn create_policy(
 ///
 /// Returns `GatewayError` on auth failure or storage error.
 pub async fn list_policies(
-    Extension(_admin_ctx): Extension<AdminContext>,
+    Extension(admin_ctx): Extension<AdminContext>,
     State(state): State<AppState>,
     Query(query): Query<ListPoliciesQuery>,
 ) -> Result<impl IntoResponse, GatewayError> {
@@ -140,13 +135,14 @@ pub async fn list_policies(
     let repo = PolicyRepo::new(pool.clone());
 
     let cursor = query.cursor.map(Cursor);
-    let limit = query.limit.unwrap_or(50);
+    let limit = validate_limit(query.limit)?;
 
     let page = repo
         .list_by_tenant(TenantId::from_uuid(query.tenant_id), cursor.as_ref(), limit)
         .await
         .map_err(map_storage_error)?;
 
+    tracing::debug!(admin_id = %admin_ctx.admin_id, tenant_id = %query.tenant_id, action = "policy.list", "admin operation");
     Ok(Json(page))
 }
 
@@ -156,7 +152,7 @@ pub async fn list_policies(
 ///
 /// Returns `GatewayError` on auth failure or if the policy is not found.
 pub async fn get_policy(
-    Extension(_admin_ctx): Extension<AdminContext>,
+    Extension(admin_ctx): Extension<AdminContext>,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Query(query): Query<GetPolicyQuery>,
@@ -172,6 +168,7 @@ pub async fn get_policy(
         .await
         .map_err(map_storage_error)?;
 
+    tracing::debug!(admin_id = %admin_ctx.admin_id, policy_id = %id, action = "policy.get", "admin operation");
     Ok(Json(policy))
 }
 
@@ -188,6 +185,9 @@ pub async fn update_policy(
     Json(body): Json<UpdatePolicyRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     require_admin_role(&admin_ctx)?;
+    if let Some(ref name) = body.name {
+        validate_name(name)?;
+    }
 
     let pool = state.require_db()?;
     let repo = PolicyRepo::new(pool.clone());
@@ -215,24 +215,16 @@ pub async fn update_policy(
         .await
         .map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let policy_tenant_id = policy.tenant_id;
-    let target_id = policy.id.0.to_string();
-    tokio::spawn(async move {
-        let audit_repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = audit_repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: Some(policy_tenant_id),
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "policy.updated".to_owned(),
-                target_type: "policy".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, policy_id = %id, action = "policy.updated", "admin operation");
+    emit_audit(
+        pool,
+        Some(policy.tenant_id),
+        admin_ctx.admin_id,
+        "policy.updated",
+        "policy",
+        policy.id.0.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok(Json(policy))
 }
@@ -266,24 +258,16 @@ pub async fn delete_policy(
         _ => map_storage_error(e),
     })?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let target_id = id.to_string();
-    let tenant_id = TenantId::from_uuid(query.tenant_id);
-    tokio::spawn(async move {
-        let audit_repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = audit_repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: Some(tenant_id),
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "policy.deleted".to_owned(),
-                target_type: "policy".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, policy_id = %id, action = "policy.deleted", "admin operation");
+    emit_audit(
+        pool,
+        Some(TenantId::from_uuid(query.tenant_id)),
+        admin_ctx.admin_id,
+        "policy.deleted",
+        "policy",
+        id.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -316,25 +300,16 @@ pub async fn create_binding(
         .await
         .map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let target_id = binding.id.to_string();
-    let policy_id_str = body.policy_id.to_string();
-    let sa_id_str = sa_id.to_string();
-    tokio::spawn(async move {
-        let audit_repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = audit_repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: None,
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "policy_binding.created".to_owned(),
-                target_type: "policy_binding".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({"service_account_id": sa_id_str, "policy_id": policy_id_str}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, service_account_id = %sa_id, policy_id = %body.policy_id, action = "policy_binding.created", "admin operation");
+    emit_audit(
+        pool,
+        None,
+        admin_ctx.admin_id,
+        "policy_binding.created",
+        "policy_binding",
+        format!("{sa_id}/{}", body.policy_id),
+        serde_json::json!({"binding_id": binding.id.to_string(), "service_account_id": sa_id.to_string(), "policy_id": body.policy_id.to_string()}),
+    );
 
     Ok((StatusCode::CREATED, Json(binding)))
 }
@@ -364,22 +339,16 @@ pub async fn delete_binding(
     .await
     .map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    tokio::spawn(async move {
-        let audit_repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = audit_repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: None,
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "policy_binding.deleted".to_owned(),
-                target_type: "policy_binding".to_owned(),
-                target_id: format!("{sa_id}/{policy_id}"),
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, service_account_id = %sa_id, policy_id = %policy_id, action = "policy_binding.deleted", "admin operation");
+    emit_audit(
+        pool,
+        None,
+        admin_ctx.admin_id,
+        "policy_binding.deleted",
+        "policy_binding",
+        format!("{sa_id}/{policy_id}"),
+        serde_json::json!({"sa_id": sa_id.to_string(), "policy_id": policy_id.to_string()}),
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }

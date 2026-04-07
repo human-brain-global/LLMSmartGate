@@ -13,7 +13,10 @@ use crate::server::AppState;
 use crate::storage::repositories::routes::RouteRepo;
 use crate::types::{RouteId, TenantId};
 
-use super::{AdminContext, map_storage_error, require_admin_role};
+use super::{
+    AdminContext, emit_audit, map_storage_error, parse_enum_str, require_admin_role,
+    validate_limit, validate_name,
+};
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -59,15 +62,12 @@ pub struct ListRoutesQuery {
 
 /// Validate the provider string against known providers.
 fn validate_provider(provider: &str) -> Result<(), GatewayError> {
-    match provider {
-        "openai" | "anthropic" | "gemini" | "azure_openai" | "vllm" => Ok(()),
-        _ => Err(GatewayError::validation(
-            "invalid_provider",
-            format!(
-                "provider must be one of: openai, anthropic, gemini, azure_openai, vllm; got: {provider}"
-            ),
-        )),
-    }
+    parse_enum_str::<crate::types::Provider>(
+        provider,
+        "provider",
+        "openai, anthropic, gemini, azure_openai, vllm",
+    )?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -87,18 +87,8 @@ pub async fn create_route(
     require_admin_role(&admin_ctx)?;
     validate_provider(&body.provider)?;
 
-    if body.model_alias.is_empty() {
-        return Err(GatewayError::validation(
-            "invalid_model_alias",
-            "model_alias must not be empty",
-        ));
-    }
-    if body.provider_model_name.is_empty() {
-        return Err(GatewayError::validation(
-            "invalid_provider_model_name",
-            "provider_model_name must not be empty",
-        ));
-    }
+    validate_name(&body.model_alias)?;
+    validate_name(&body.provider_model_name)?;
 
     let pool = state.require_db()?;
     let repo = RouteRepo::new(pool.clone());
@@ -118,24 +108,16 @@ pub async fn create_route(
 
     let route = repo.create(&input).await.map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let route_tenant_id = route.tenant_id;
-    let target_id = route.id.0.to_string();
-    tokio::spawn(async move {
-        let audit_repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = audit_repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: route_tenant_id,
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "route.created".to_owned(),
-                target_type: "route".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, route_id = %route.id, action = "route.created", "admin operation");
+    emit_audit(
+        pool,
+        route.tenant_id,
+        admin_ctx.admin_id,
+        "route.created",
+        "route",
+        route.id.0.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok((StatusCode::CREATED, Json(route)))
 }
@@ -146,7 +128,7 @@ pub async fn create_route(
 ///
 /// Returns `GatewayError` on auth failure or storage error.
 pub async fn list_routes(
-    Extension(_admin_ctx): Extension<AdminContext>,
+    Extension(admin_ctx): Extension<AdminContext>,
     State(state): State<AppState>,
     Query(query): Query<ListRoutesQuery>,
 ) -> Result<impl IntoResponse, GatewayError> {
@@ -154,7 +136,7 @@ pub async fn list_routes(
     let repo = RouteRepo::new(pool.clone());
 
     let cursor = query.cursor.map(Cursor);
-    let limit = query.limit.unwrap_or(50);
+    let limit = validate_limit(query.limit)?;
 
     // When tenant_id is provided, list tenant-scoped routes.
     // When absent, list global routes (tenant_id IS NULL).
@@ -169,6 +151,7 @@ pub async fn list_routes(
             .map_err(map_storage_error)?,
     };
 
+    tracing::debug!(admin_id = %admin_ctx.admin_id, action = "route.list", "admin operation");
     Ok(Json(page))
 }
 
@@ -178,7 +161,7 @@ pub async fn list_routes(
 ///
 /// Returns `GatewayError` on auth failure or if the route is not found.
 pub async fn get_route(
-    Extension(_admin_ctx): Extension<AdminContext>,
+    Extension(admin_ctx): Extension<AdminContext>,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, GatewayError> {
@@ -190,6 +173,7 @@ pub async fn get_route(
         .await
         .map_err(map_storage_error)?;
 
+    tracing::debug!(admin_id = %admin_ctx.admin_id, route_id = %id, action = "route.get", "admin operation");
     Ok(Json(route))
 }
 
@@ -206,9 +190,15 @@ pub async fn update_route(
 ) -> Result<impl IntoResponse, GatewayError> {
     require_admin_role(&admin_ctx)?;
 
-    // Validate provider if being updated
+    // Validate fields if being updated
     if let Some(ref provider) = body.provider {
         validate_provider(provider)?;
+    }
+    if let Some(ref model_alias) = body.model_alias {
+        validate_name(model_alias)?;
+    }
+    if let Some(ref provider_model_name) = body.provider_model_name {
+        validate_name(provider_model_name)?;
     }
 
     let pool = state.require_db()?;
@@ -231,24 +221,16 @@ pub async fn update_route(
         .await
         .map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let route_tenant_id = route.tenant_id;
-    let target_id = route.id.0.to_string();
-    tokio::spawn(async move {
-        let audit_repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = audit_repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: route_tenant_id,
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "route.updated".to_owned(),
-                target_type: "route".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, route_id = %id, action = "route.updated", "admin operation");
+    emit_audit(
+        pool,
+        route.tenant_id,
+        admin_ctx.admin_id,
+        "route.updated",
+        "route",
+        route.id.0.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok(Json(route))
 }
@@ -272,23 +254,16 @@ pub async fn delete_route(
         .await
         .map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let target_id = id.to_string();
-    tokio::spawn(async move {
-        let audit_repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = audit_repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: None,
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "route.deleted".to_owned(),
-                target_type: "route".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, route_id = %id, action = "route.deleted", "admin operation");
+    emit_audit(
+        pool,
+        None,
+        admin_ctx.admin_id,
+        "route.deleted",
+        "route",
+        id.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }

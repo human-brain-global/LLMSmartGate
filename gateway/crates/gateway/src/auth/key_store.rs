@@ -95,6 +95,21 @@ impl KeyStore {
         Ok(key)
     }
 
+    /// Invalidate a key from both L1 (moka) and L2 (Redis) caches.
+    ///
+    /// Called after key revocation to ensure the revoked key stops
+    /// authenticating immediately rather than waiting for TTL expiry.
+    pub async fn invalidate(&self, key_id: &str) {
+        self.l1.invalidate(key_id).await;
+
+        if let Some(redis) = &self.redis {
+            let redis_key = format!("{L2_KEY_PREFIX}{key_id}");
+            if let Err(e) = redis.del(&redis_key).await {
+                tracing::warn!(key_id = %key_id, error = %e, "failed to invalidate key from Redis cache");
+            }
+        }
+    }
+
     /// Try to read a cached key from Redis L2.
     async fn get_from_redis(
         &self,

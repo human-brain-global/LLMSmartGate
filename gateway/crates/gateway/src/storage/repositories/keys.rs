@@ -2,7 +2,7 @@
 
 use sqlx::PgPool;
 
-use crate::models::{RegisterKey, ServiceAccountKey};
+use crate::models::{Cursor, Page, RegisterKey, ServiceAccountKey, clamp_limit};
 use crate::storage::StorageError;
 use crate::types::{KeyId, KeyStatus, ServiceAccountId};
 
@@ -67,7 +67,8 @@ impl KeyRepo {
         .ok_or_else(|| StorageError::not_found("key", "key_id", key_id))
     }
 
-    /// List all keys belonging to a service account.
+    /// List keys belonging to a service account with cursor-based pagination,
+    /// ordered descending (newest first).
     ///
     /// # Errors
     ///
@@ -75,19 +76,43 @@ impl KeyRepo {
     pub async fn list_by_service_account(
         &self,
         service_account_id: ServiceAccountId,
-    ) -> Result<Vec<ServiceAccountKey>, StorageError> {
-        let rows = sqlx::query_as::<_, ServiceAccountKey>(
-            r"SELECT id, service_account_id, key_id, algorithm, public_key_pem,
-                      fingerprint, status, expires_at, created_at, revoked_at, last_used_at
-               FROM service_account_keys
-               WHERE service_account_id = $1
-               ORDER BY created_at DESC",
-        )
-        .bind(service_account_id)
-        .fetch_all(&self.pool)
-        .await?;
+        cursor: Option<&Cursor>,
+        limit: i64,
+    ) -> Result<Page<ServiceAccountKey>, StorageError> {
+        let (limit, fetch_limit) = clamp_limit(limit);
 
-        Ok(rows)
+        let rows = if let Some(c) = cursor {
+            let (ts, id) = c.decode().map_err(StorageError::InvalidCursor)?;
+            sqlx::query_as::<_, ServiceAccountKey>(
+                r"SELECT id, service_account_id, key_id, algorithm, public_key_pem,
+                          fingerprint, status, expires_at, created_at, revoked_at, last_used_at
+                   FROM service_account_keys
+                   WHERE service_account_id = $1 AND (created_at, id) < ($2, $3)
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT $4",
+            )
+            .bind(service_account_id)
+            .bind(ts)
+            .bind(id)
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, ServiceAccountKey>(
+                r"SELECT id, service_account_id, key_id, algorithm, public_key_pem,
+                          fingerprint, status, expires_at, created_at, revoked_at, last_used_at
+                   FROM service_account_keys
+                   WHERE service_account_id = $1
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT $2",
+            )
+            .bind(service_account_id)
+            .bind(fetch_limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        Ok(Page::from_rows(rows, limit, |k| (k.created_at, k.id.0)))
     }
 
     /// Revoke a key by setting its status to `revoked` and recording the timestamp.
@@ -248,14 +273,15 @@ mod tests {
                 .expect("register_key should succeed");
         }
 
-        let keys = repo
-            .list_by_service_account(sa.id)
+        let page = repo
+            .list_by_service_account(sa.id, None, 50)
             .await
             .expect("list should succeed");
-        assert_eq!(keys.len(), 3);
+        assert_eq!(page.items.len(), 3);
+        assert!(!page.has_more);
 
         // All keys belong to this service account
-        for key in &keys {
+        for key in &page.items {
             assert_eq!(key.service_account_id, sa.id);
         }
     }

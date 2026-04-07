@@ -17,7 +17,10 @@ use crate::storage::repositories::keys::KeyRepo;
 use crate::storage::repositories::service_accounts::ServiceAccountRepo;
 use crate::types::{Environment, ServiceAccountId, ServiceAccountStatus, TenantId};
 
-use super::{AdminContext, map_storage_error, require_admin_role, validate_slug};
+use super::{
+    AdminContext, emit_audit, map_storage_error, parse_enum_str, require_admin_role,
+    validate_key_id, validate_limit, validate_name, validate_slug,
+};
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -69,17 +72,37 @@ pub struct KeyRegistrationResponse {
     pub created_at: DateTime<Utc>,
 }
 
+/// Response type for key listing -- omits the full public key PEM.
+#[derive(Debug, Serialize)]
+pub struct KeySummaryResponse {
+    pub id: Uuid,
+    pub key_id: String,
+    pub fingerprint: String,
+    pub algorithm: String,
+    pub status: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+impl From<crate::models::ServiceAccountKey> for KeySummaryResponse {
+    fn from(k: crate::models::ServiceAccountKey) -> Self {
+        Self {
+            id: k.id.0,
+            key_id: k.key_id,
+            fingerprint: k.fingerprint,
+            algorithm: k.algorithm,
+            status: k.status.to_string(),
+            expires_at: k.expires_at,
+            created_at: k.created_at,
+            last_used_at: k.last_used_at,
+        }
+    }
+}
+
 /// Parse an environment string into the `Environment` enum.
 fn parse_environment(env: &str) -> Result<Environment, GatewayError> {
-    match env {
-        "dev" => Ok(Environment::Dev),
-        "staging" => Ok(Environment::Staging),
-        "prod" => Ok(Environment::Prod),
-        _ => Err(GatewayError::validation(
-            "invalid_environment",
-            format!("environment must be one of: dev, staging, prod; got: {env}"),
-        )),
-    }
+    parse_enum_str(env, "environment", "dev, staging, prod")
 }
 
 /// Compute SHA-256 fingerprint of public key bytes as hex string.
@@ -102,6 +125,7 @@ pub async fn create_service_account(
     Json(body): Json<CreateServiceAccountRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     require_admin_role(&admin_ctx)?;
+    validate_name(&body.name)?;
     validate_slug(&body.slug)?;
     let environment = parse_environment(&body.environment)?;
 
@@ -121,24 +145,16 @@ pub async fn create_service_account(
 
     let sa = repo.create(&input).await.map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let sa_tenant_id = sa.tenant_id;
-    let target_id = sa.id.0.to_string();
-    tokio::spawn(async move {
-        let repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: Some(sa_tenant_id),
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "service_account.created".to_owned(),
-                target_type: "service_account".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, service_account_id = %sa.id, action = "service_account.created", "admin operation");
+    emit_audit(
+        pool,
+        Some(sa.tenant_id),
+        admin_ctx.admin_id,
+        "service_account.created",
+        "service_account",
+        sa.id.0.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok((StatusCode::CREATED, Json(sa)))
 }
@@ -149,7 +165,7 @@ pub async fn create_service_account(
 ///
 /// Returns `GatewayError` on auth failure or storage error.
 pub async fn list_service_accounts(
-    Extension(_admin_ctx): Extension<AdminContext>,
+    Extension(admin_ctx): Extension<AdminContext>,
     State(state): State<AppState>,
     Query(query): Query<ListServiceAccountsQuery>,
 ) -> Result<impl IntoResponse, GatewayError> {
@@ -157,13 +173,14 @@ pub async fn list_service_accounts(
     let repo = ServiceAccountRepo::new(pool.clone());
 
     let cursor = query.cursor.map(Cursor);
-    let limit = query.limit.unwrap_or(50);
+    let limit = validate_limit(query.limit)?;
 
     let page = repo
         .list_by_tenant(TenantId::from_uuid(query.tenant_id), cursor.as_ref(), limit)
         .await
         .map_err(map_storage_error)?;
 
+    tracing::debug!(admin_id = %admin_ctx.admin_id, tenant_id = %query.tenant_id, action = "service_account.list", "admin operation");
     Ok(Json(page))
 }
 
@@ -173,7 +190,7 @@ pub async fn list_service_accounts(
 ///
 /// Returns `GatewayError` on auth failure or if the service account is not found.
 pub async fn get_service_account(
-    Extension(_admin_ctx): Extension<AdminContext>,
+    Extension(admin_ctx): Extension<AdminContext>,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Query(query): Query<GetServiceAccountQuery>,
@@ -189,6 +206,7 @@ pub async fn get_service_account(
         .await
         .map_err(map_storage_error)?;
 
+    tracing::debug!(admin_id = %admin_ctx.admin_id, service_account_id = %id, action = "service_account.get", "admin operation");
     Ok(Json(sa))
 }
 
@@ -205,6 +223,9 @@ pub async fn update_service_account(
     Json(body): Json<UpdateServiceAccountRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     require_admin_role(&admin_ctx)?;
+    if let Some(ref name) = body.name {
+        validate_name(name)?;
+    }
 
     let pool = state.require_db()?;
     let repo = ServiceAccountRepo::new(pool.clone());
@@ -224,24 +245,16 @@ pub async fn update_service_account(
         .await
         .map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let sa_tenant_id = sa.tenant_id;
-    let target_id = sa.id.0.to_string();
-    tokio::spawn(async move {
-        let repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: Some(sa_tenant_id),
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "service_account.updated".to_owned(),
-                target_type: "service_account".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, service_account_id = %id, action = "service_account.updated", "admin operation");
+    emit_audit(
+        pool,
+        Some(sa.tenant_id),
+        admin_ctx.admin_id,
+        "service_account.updated",
+        "service_account",
+        sa.id.0.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok(Json(sa))
 }
@@ -270,24 +283,16 @@ pub async fn suspend_service_account(
         .await
         .map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let sa_tenant_id = sa.tenant_id;
-    let target_id = sa.id.0.to_string();
-    tokio::spawn(async move {
-        let repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: Some(sa_tenant_id),
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "service_account.suspended".to_owned(),
-                target_type: "service_account".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, service_account_id = %id, action = "service_account.suspended", "admin operation");
+    emit_audit(
+        pool,
+        Some(sa.tenant_id),
+        admin_ctx.admin_id,
+        "service_account.suspended",
+        "service_account",
+        sa.id.0.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok(Json(sa))
 }
@@ -316,24 +321,16 @@ pub async fn activate_service_account(
         .await
         .map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let sa_tenant_id = sa.tenant_id;
-    let target_id = sa.id.0.to_string();
-    tokio::spawn(async move {
-        let repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: Some(sa_tenant_id),
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "service_account.activated".to_owned(),
-                target_type: "service_account".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, service_account_id = %id, action = "service_account.activated", "admin operation");
+    emit_audit(
+        pool,
+        Some(sa.tenant_id),
+        admin_ctx.admin_id,
+        "service_account.activated",
+        "service_account",
+        sa.id.0.to_string(),
+        serde_json::json!({}),
+    );
 
     Ok(Json(sa))
 }
@@ -350,6 +347,7 @@ pub async fn register_key(
     Json(body): Json<RegisterKeyRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
     require_admin_role(&admin_ctx)?;
+    validate_key_id(&body.key_id)?;
 
     // Validate PEM and extract public key bytes
     let verifying_key = parse_public_key(&body.public_key_pem).map_err(|_| {
@@ -383,28 +381,21 @@ pub async fn register_key(
         key_id: key.key_id,
         fingerprint: key.fingerprint,
         algorithm: key.algorithm,
-        status: format!("{:?}", key.status).to_lowercase(),
+        status: key.status.to_string(),
         expires_at: key.expires_at,
         created_at: key.created_at,
     };
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    let target_id = key.id.0.to_string();
-    tokio::spawn(async move {
-        let repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: None,
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "key.registered".to_owned(),
-                target_type: "key".to_owned(),
-                target_id,
-                metadata_json: serde_json::json!({"service_account_id": id.to_string()}),
-            })
-            .await;
-    });
+    tracing::info!(admin_id = %admin_ctx.admin_id, service_account_id = %id, action = "key.registered", "admin operation");
+    emit_audit(
+        pool,
+        None,
+        admin_ctx.admin_id,
+        "key.registered",
+        "key",
+        key.id.0.to_string(),
+        serde_json::json!({"service_account_id": id.to_string()}),
+    );
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -432,24 +423,30 @@ pub async fn revoke_key(
         .await
         .map_err(map_storage_error)?;
 
-    let audit_pool = pool.clone();
-    let actor = admin_ctx.admin_id.to_string();
-    tokio::spawn(async move {
-        let repo = crate::storage::repositories::audit::AuditRepo::new(audit_pool);
-        let _ = repo
-            .insert(&crate::storage::repositories::audit::CreateAuditEvent {
-                tenant_id: None,
-                actor_type: "admin_user".to_owned(),
-                actor_id: actor,
-                action: "key.revoked".to_owned(),
-                target_type: "key".to_owned(),
-                target_id: key_id.to_string(),
-                metadata_json: serde_json::json!({"service_account_id": sa_id.to_string()}),
-            })
-            .await;
-    });
+    // Invalidate the 3-tier key cache so the revoked key stops authenticating immediately.
+    if let Some(ref key_store) = state.key_store {
+        key_store.invalidate(&key.key_id).await;
+    }
+
+    tracing::info!(admin_id = %admin_ctx.admin_id, service_account_id = %sa_id, key_id = %key_id, action = "key.revoked", "admin operation");
+    emit_audit(
+        pool,
+        None,
+        admin_ctx.admin_id,
+        "key.revoked",
+        "key",
+        key_id.to_string(),
+        serde_json::json!({"service_account_id": sa_id.to_string()}),
+    );
 
     Ok(Json(key))
+}
+
+/// Query parameters for listing keys.
+#[derive(Debug, Deserialize)]
+pub struct ListKeysQuery {
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
 }
 
 /// GET /admin/v1/service-accounts/:id/keys
@@ -458,19 +455,34 @@ pub async fn revoke_key(
 ///
 /// Returns `GatewayError` on auth failure or storage error.
 pub async fn list_keys(
-    Extension(_admin_ctx): Extension<AdminContext>,
+    Extension(admin_ctx): Extension<AdminContext>,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<ListKeysQuery>,
 ) -> Result<impl IntoResponse, GatewayError> {
     let pool = state.require_db()?;
     let key_repo = KeyRepo::new(pool.clone());
 
-    let keys = key_repo
-        .list_by_service_account(ServiceAccountId::from_uuid(id))
+    let cursor = query.cursor.map(Cursor);
+    let limit = validate_limit(query.limit)?;
+
+    let page = key_repo
+        .list_by_service_account(ServiceAccountId::from_uuid(id), cursor.as_ref(), limit)
         .await
         .map_err(map_storage_error)?;
 
-    Ok(Json(keys))
+    let response_page = crate::models::Page {
+        items: page
+            .items
+            .into_iter()
+            .map(KeySummaryResponse::from)
+            .collect(),
+        next_cursor: page.next_cursor,
+        has_more: page.has_more,
+    };
+
+    tracing::debug!(admin_id = %admin_ctx.admin_id, service_account_id = %id, action = "key.list", "admin operation");
+    Ok(Json(response_page))
 }
 
 // ===========================================================================
@@ -612,6 +624,25 @@ mod tests {
     // -----------------------------------------------------------------------
     // Key registration response serialization
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn key_summary_response_omits_public_key_pem() {
+        let resp = KeySummaryResponse {
+            id: Uuid::new_v4(),
+            key_id: "test-key-id".to_owned(),
+            fingerprint: "abc123".to_owned(),
+            algorithm: "ed25519".to_owned(),
+            status: "active".to_owned(),
+            expires_at: None,
+            created_at: Utc::now(),
+            last_used_at: None,
+        };
+        let json = serde_json::to_value(&resp).expect("serialization");
+        assert!(
+            json.get("public_key_pem").is_none(),
+            "public_key_pem must not be in response"
+        );
+    }
 
     #[test]
     fn key_registration_response_serializes() {

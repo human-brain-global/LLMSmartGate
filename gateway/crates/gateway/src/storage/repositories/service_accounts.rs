@@ -6,7 +6,24 @@ use crate::models::{
     CreateServiceAccount, Cursor, Page, ServiceAccount, UpdateServiceAccount, clamp_limit,
 };
 use crate::storage::StorageError;
-use crate::types::{ServiceAccountId, ServiceAccountStatus, TenantId};
+use crate::types::{ServiceAccountId, ServiceAccountStatus, TenantId, TenantStatus};
+
+/// Service account with its parent tenant's status, used by the auth hot path
+/// to avoid a separate tenant lookup.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ServiceAccountWithTenantStatus {
+    pub id: ServiceAccountId,
+    pub tenant_id: TenantId,
+    pub name: String,
+    pub slug: String,
+    pub environment: crate::types::Environment,
+    pub description: Option<String>,
+    pub status: ServiceAccountStatus,
+    pub default_policy_id: Option<crate::types::PolicyId>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub tenant_status: TenantStatus,
+}
 
 /// Repository for service account persistence.
 #[derive(Clone)]
@@ -66,6 +83,33 @@ impl ServiceAccountRepo {
                       status, default_policy_id, created_at, updated_at
                FROM service_accounts
                WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StorageError::not_found("service_account", "id", id))
+    }
+
+    /// Fetch a service account with its parent tenant's status in a single query.
+    ///
+    /// Used by the auth middleware to verify both the SA and tenant are active
+    /// without a second database round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::NotFound`] if the service account does not exist.
+    pub async fn get_with_tenant_status(
+        &self,
+        id: ServiceAccountId,
+    ) -> Result<ServiceAccountWithTenantStatus, StorageError> {
+        sqlx::query_as::<_, ServiceAccountWithTenantStatus>(
+            r"SELECT sa.id, sa.tenant_id, sa.name, sa.slug, sa.environment,
+                      sa.description, sa.status, sa.default_policy_id,
+                      sa.created_at, sa.updated_at,
+                      t.status AS tenant_status
+               FROM service_accounts sa
+               INNER JOIN tenants t ON t.id = sa.tenant_id
+               WHERE sa.id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
