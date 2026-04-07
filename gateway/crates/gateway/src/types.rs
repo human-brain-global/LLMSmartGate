@@ -112,6 +112,16 @@ pub enum ServiceAccountStatus {
     Deleted,
 }
 
+impl fmt::Display for ServiceAccountStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Active => write!(f, "active"),
+            Self::Suspended => write!(f, "suspended"),
+            Self::Deleted => write!(f, "deleted"),
+        }
+    }
+}
+
 /// Lifecycle status of an API key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "lowercase")]

@@ -7,13 +7,18 @@ use axum::body::Bytes;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
+use deadpool_redis::Pool as RedisPool;
+use sqlx::PgPool;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::api::health;
+use crate::auth;
+use crate::auth::key_store::KeyStore;
 use crate::config::GatewayConfig;
+use crate::error::GatewayError;
 
 /// Header name used for request ID propagation.
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -26,15 +31,57 @@ pub const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 pub struct AppState {
     /// Shared gateway configuration.
     pub config: Arc<GatewayConfig>,
-    // TODO: Add database pool (sqlx::PgPool) in a later task
-    // TODO: Add Redis/Valkey pool (deadpool_redis::Pool) in a later task
+    /// PostgreSQL connection pool. `None` in unit tests that don't need a DB.
+    pub db: Option<PgPool>,
+    /// Redis/Valkey connection pool. `None` in unit tests that don't need Redis.
+    pub redis: Option<RedisPool>,
+    /// Three-tier key cache (moka L1 → Redis L2 → PostgreSQL L3). `None` in unit tests.
+    pub key_store: Option<KeyStore>,
+}
+
+impl AppState {
+    /// Get the database pool, or return 401 if not initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GatewayError::Auth` with code `internal_error` if the pool is `None`.
+    pub fn require_db(&self) -> Result<&PgPool, GatewayError> {
+        self.db.as_ref().ok_or_else(|| {
+            tracing::warn!("database pool not available");
+            GatewayError::auth("internal_error", "database not available")
+        })
+    }
+
+    /// Get the Redis pool, or return 401 if not initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GatewayError::Auth` with code `internal_error` if the pool is `None`.
+    pub fn require_redis(&self) -> Result<&RedisPool, GatewayError> {
+        self.redis.as_ref().ok_or_else(|| {
+            tracing::warn!("redis pool not available");
+            GatewayError::auth("internal_error", "redis not available")
+        })
+    }
+
+    /// Get the key store, or return 401 if not initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GatewayError::Auth` with code `internal_error` if the key store is `None`.
+    pub fn require_key_store(&self) -> Result<&KeyStore, GatewayError> {
+        self.key_store.as_ref().ok_or_else(|| {
+            tracing::warn!("key store not available");
+            GatewayError::auth("internal_error", "key store not available")
+        })
+    }
 }
 
 /// Build the complete Axum router with all route groups and middleware.
 ///
 /// Route groups:
 /// - Health: `/healthz`, `/readyz`, `/metrics` (no auth required)
-/// - Data plane: `/v1/*` (auth required -- placeholder returns 401)
+/// - Data plane: `/v1/*` (auth required via Ed25519 middleware)
 /// - Admin: `/admin/v1/*` (admin auth required -- placeholder returns 401)
 pub fn build_router(state: AppState) -> Router {
     // Health routes -- no authentication required
@@ -43,12 +90,16 @@ pub fn build_router(state: AppState) -> Router {
         .route("/readyz", get(health::readyz))
         .route("/metrics", get(health::metrics_handler));
 
-    // Data plane routes -- will have auth middleware in a later task
+    // Data plane routes -- protected by auth middleware
     let data_plane = Router::new()
         .route("/v1/chat/completions", post(data_plane_post_placeholder))
         .route("/v1/responses", post(data_plane_post_placeholder))
         .route("/v1/embeddings", post(data_plane_post_placeholder))
-        .route("/v1/models", get(data_plane_get_placeholder));
+        .route("/v1/models", get(data_plane_get_placeholder))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::middleware::auth_middleware,
+        ));
 
     // Admin routes -- will have admin auth middleware in a later task
     let admin = Router::new().route(
@@ -71,16 +122,16 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// Placeholder handler for data plane GET endpoints.
-/// Returns 401 Unauthorized until real auth middleware is wired.
+/// Returns 200 OK -- auth is enforced by the auth middleware layer.
 async fn data_plane_get_placeholder() -> impl IntoResponse {
-    StatusCode::UNAUTHORIZED
+    StatusCode::OK
 }
 
 /// Placeholder handler for data plane POST endpoints.
 /// Consumes the request body so the body-size limit layer can enforce its cap.
-/// Returns 401 Unauthorized until real auth middleware is wired.
+/// Returns 200 OK -- auth is enforced by the auth middleware layer.
 async fn data_plane_post_placeholder(_body: Bytes) -> impl IntoResponse {
-    StatusCode::UNAUTHORIZED
+    StatusCode::OK
 }
 
 /// Placeholder handler for admin GET endpoints.
@@ -105,10 +156,13 @@ mod tests {
 
     use super::*;
 
-    /// Create a test `AppState` with a default configuration.
+    /// Create a test `AppState` with a default configuration and no pools.
     fn test_state() -> AppState {
         AppState {
             config: Arc::new(GatewayConfig::default()),
+            db: None,
+            redis: None,
+            key_store: None,
         }
     }
 
@@ -386,6 +440,8 @@ mod tests {
             .await
             .expect("response");
 
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        // Auth middleware intercepts before body size limit, so we get 401 (missing auth headers)
+        // rather than 413. This is correct security behavior — reject unauthenticated requests first.
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

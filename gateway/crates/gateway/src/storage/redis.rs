@@ -154,6 +154,34 @@ impl RedisClient {
             .await
             .map_err(|e| StorageError::Redis(e.to_string()))
     }
+
+    /// Set a key only if it does not exist (NX), with expiry in seconds (EX).
+    /// Returns `true` if the key was set (did not exist), `false` if it already existed.
+    ///
+    /// This is the atomic operation needed for nonce replay protection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::Redis`] if the command fails.
+    pub async fn set_nx_ex(
+        &self,
+        key: &str,
+        value: &str,
+        seconds: u64,
+    ) -> Result<bool, StorageError> {
+        let mut conn = self.conn().await?;
+        // Redis SET key value NX EX seconds -> returns OK if set, nil if key existed
+        let result: Option<String> = redis::cmd("SET")
+            .arg(key)
+            .arg(value)
+            .arg("NX")
+            .arg("EX")
+            .arg(seconds)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| StorageError::Redis(e.to_string()))?;
+        Ok(result.is_some())
+    }
 }
 
 #[cfg(test)]
@@ -320,6 +348,85 @@ mod tests {
 
         let value = client.get(&key).await.expect("GET should succeed");
         assert_eq!(value, None, "missing key should return None");
+    }
+
+    #[tokio::test]
+    async fn set_nx_ex_first_call_sets_key() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("SKIP: Redis not available");
+            return;
+        };
+        let client = RedisClient::new(pool);
+        let key = test_key("set_nx_ex_first");
+
+        let was_set = client
+            .set_nx_ex(&key, "1", 10)
+            .await
+            .expect("SET NX EX should succeed");
+        assert!(was_set, "first SET NX should return true (key was set)");
+
+        let value = client.get(&key).await.expect("GET should succeed");
+        assert_eq!(value.as_deref(), Some("1"));
+
+        // Cleanup
+        client.del(&key).await.expect("DEL should succeed");
+    }
+
+    #[tokio::test]
+    async fn set_nx_ex_second_call_returns_false() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("SKIP: Redis not available");
+            return;
+        };
+        let client = RedisClient::new(pool);
+        let key = test_key("set_nx_ex_second");
+
+        let first = client
+            .set_nx_ex(&key, "1", 10)
+            .await
+            .expect("first SET NX EX should succeed");
+        assert!(first, "first call should set the key");
+
+        let second = client
+            .set_nx_ex(&key, "2", 10)
+            .await
+            .expect("second SET NX EX should succeed");
+        assert!(!second, "second call should return false (key exists)");
+
+        // Value should still be the original
+        let value = client.get(&key).await.expect("GET should succeed");
+        assert_eq!(value.as_deref(), Some("1"));
+
+        // Cleanup
+        client.del(&key).await.expect("DEL should succeed");
+    }
+
+    #[tokio::test]
+    async fn set_nx_ex_has_ttl() {
+        let Some(pool) = test_pool().await else {
+            eprintln!("SKIP: Redis not available");
+            return;
+        };
+        let client = RedisClient::new(pool.clone());
+        let key = test_key("set_nx_ex_ttl");
+
+        client
+            .set_nx_ex(&key, "1", 10)
+            .await
+            .expect("SET NX EX should succeed");
+
+        // Verify TTL was set
+        let mut conn = pool.get().await.expect("should get connection");
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .expect("TTL query should succeed");
+        assert!(ttl > 0, "TTL should be positive, got {ttl}");
+        assert!(ttl <= 10, "TTL should be <= 10, got {ttl}");
+
+        // Cleanup
+        client.del(&key).await.expect("DEL should succeed");
     }
 
     #[test]

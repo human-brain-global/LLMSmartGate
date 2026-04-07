@@ -47,6 +47,30 @@ impl ServiceAccountRepo {
         .map_err(StorageError::from)
     }
 
+    /// Fetch a single service account by primary key without tenant scoping.
+    ///
+    /// Used internally by the auth middleware where the caller only has a
+    /// `service_account_id` (from the key record) and no tenant context yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::NotFound`] if the service account does not exist.
+    pub async fn get_by_id_unscoped(
+        &self,
+        id: ServiceAccountId,
+    ) -> Result<ServiceAccount, StorageError> {
+        sqlx::query_as::<_, ServiceAccount>(
+            r"SELECT id, tenant_id, name, slug, environment, description,
+                      status, default_policy_id, created_at, updated_at
+               FROM service_accounts
+               WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StorageError::not_found("service_account", "id", id))
+    }
+
     /// Fetch a single service account by primary key, scoped to tenant.
     ///
     /// # Errors

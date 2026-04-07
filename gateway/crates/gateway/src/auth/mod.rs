@@ -3,5 +3,6 @@
 pub mod canonical;
 pub mod context;
 pub mod key_store;
+pub mod middleware;
 pub mod nonce;
 pub mod verifier;

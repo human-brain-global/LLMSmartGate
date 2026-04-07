@@ -30,6 +30,9 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from((config.server.host, config.server.port));
     let state = AppState {
         config: Arc::new(config),
+        db: None,
+        redis: None,
+        key_store: None,
     };
     let app = build_router(state);
 

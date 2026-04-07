@@ -55,6 +55,7 @@ dotenvy = { workspace = true }
 config = { workspace = true }
 num_cpus = { workspace = true }
 rust_decimal = { workspace = true }
+http-body-util = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
