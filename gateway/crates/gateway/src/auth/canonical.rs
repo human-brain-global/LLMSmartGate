@@ -42,8 +42,7 @@ pub fn compute_body_hash(body: &[u8]) -> String {
 
 /// Lookup table for hex encoding (avoids per-byte formatting overhead).
 const HEX_TABLE: [char; 16] = [
-    '0', '1', '2', '3', '4', '5', '6', '7',
-    '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
 ];
 
 /// Verify that the provided hash matches the SHA-256 hash of the body.
@@ -89,8 +88,7 @@ mod tests {
 
     #[test]
     fn canonical_string_with_query_params() {
-        let result =
-            build_canonical_string("GET", "/v1/models?limit=10", "123", "nonce1", "hash1");
+        let result = build_canonical_string("GET", "/v1/models?limit=10", "123", "nonce1", "hash1");
         assert!(result.contains("/v1/models?limit=10"));
     }
 
@@ -137,7 +135,10 @@ mod tests {
     fn compute_hash_is_lowercase_hex() {
         let hash = compute_body_hash(b"test");
         // All chars should be lowercase hex digits
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(
+            hash.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
     }
 
     #[test]
@@ -169,8 +170,7 @@ mod tests {
 
     #[test]
     fn verify_body_hash_empty_body() {
-        let empty_hash =
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let empty_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         assert!(verify_body_hash(b"", empty_hash).is_ok());
     }
 

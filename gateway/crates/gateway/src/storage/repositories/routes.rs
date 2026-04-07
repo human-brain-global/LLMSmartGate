@@ -77,9 +77,7 @@ impl RouteRepo {
         let (limit, fetch_limit) = clamp_limit(limit);
 
         let rows = if let Some(c) = cursor {
-            let (ts, id) = c
-                .decode()
-                .map_err(StorageError::InvalidCursor)?;
+            let (ts, id) = c.decode().map_err(StorageError::InvalidCursor)?;
             sqlx::query_as::<_, ProviderRoute>(
                 r"
                 SELECT * FROM provider_routes

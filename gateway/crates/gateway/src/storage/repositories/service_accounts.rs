@@ -2,7 +2,9 @@
 
 use sqlx::PgPool;
 
-use crate::models::{CreateServiceAccount, Cursor, Page, ServiceAccount, UpdateServiceAccount, clamp_limit};
+use crate::models::{
+    CreateServiceAccount, Cursor, Page, ServiceAccount, UpdateServiceAccount, clamp_limit,
+};
 use crate::storage::StorageError;
 use crate::types::{ServiceAccountId, ServiceAccountStatus, TenantId};
 
@@ -109,9 +111,7 @@ impl ServiceAccountRepo {
         let (limit, fetch_limit) = clamp_limit(limit);
 
         let rows = if let Some(c) = cursor {
-            let (ts, id) = c
-                .decode()
-                .map_err(StorageError::InvalidCursor)?;
+            let (ts, id) = c.decode().map_err(StorageError::InvalidCursor)?;
             sqlx::query_as::<_, ServiceAccount>(
                 r"SELECT id, tenant_id, name, slug, environment, description,
                           status, default_policy_id, created_at, updated_at

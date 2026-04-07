@@ -59,7 +59,10 @@ impl KeyStore {
     /// # Errors
     ///
     /// Returns `GatewayError::Auth` with code `unknown_key` if the key does not exist.
-    pub async fn get_by_key_id(&self, key_id: &str) -> Result<Arc<ServiceAccountKey>, GatewayError> {
+    pub async fn get_by_key_id(
+        &self,
+        key_id: &str,
+    ) -> Result<Arc<ServiceAccountKey>, GatewayError> {
         // L1: in-process cache
         if let Some(key) = self.l1.get(key_id).await {
             return Ok(key);
@@ -93,7 +96,11 @@ impl KeyStore {
     }
 
     /// Try to read a cached key from Redis L2.
-    async fn get_from_redis(&self, redis: &RedisClient, key_id: &str) -> Option<Arc<ServiceAccountKey>> {
+    async fn get_from_redis(
+        &self,
+        redis: &RedisClient,
+        key_id: &str,
+    ) -> Option<Arc<ServiceAccountKey>> {
         let redis_key = format!("{L2_KEY_PREFIX}{key_id}");
         let json = redis.get(&redis_key).await.ok()??;
         let key: ServiceAccountKey = serde_json::from_str(&json).ok()?;

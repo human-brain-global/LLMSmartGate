@@ -84,9 +84,7 @@ impl TenantRepo {
         let (limit, fetch_limit) = clamp_limit(limit);
 
         let rows = if let Some(c) = cursor {
-            let (ts, id) = c
-                .decode()
-                .map_err(StorageError::InvalidCursor)?;
+            let (ts, id) = c.decode().map_err(StorageError::InvalidCursor)?;
             sqlx::query_as::<_, Tenant>(
                 r"SELECT id, name, slug, status, metadata, created_at, updated_at
                    FROM tenants

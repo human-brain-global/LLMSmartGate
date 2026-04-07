@@ -86,7 +86,10 @@ async fn verify_key(
     match key.status {
         KeyStatus::Revoked => {
             tracing::warn!(key_id = %key_id, "auth: revoked key used");
-            return Err(GatewayError::auth("key_revoked", "this key has been revoked"));
+            return Err(GatewayError::auth(
+                "key_revoked",
+                "this key has been revoked",
+            ));
         }
         KeyStatus::Expired => {
             tracing::warn!(key_id = %key_id, "auth: expired key used");
@@ -181,13 +184,25 @@ pub async fn auth_middleware(
         .map_or_else(|| parts.uri.path().to_owned(), ToString::to_string);
     verifier::verify_signature(
         &public_key,
-        &canonical::build_canonical_string(parts.method.as_str(), &path, &h.timestamp, &h.nonce, &h.body_hash),
+        &canonical::build_canonical_string(
+            parts.method.as_str(),
+            &path,
+            &h.timestamp,
+            &h.nonce,
+            &h.body_hash,
+        ),
         &h.signature,
     )?;
 
     // 7. Check nonce replay (Redis)
     let redis_client = RedisClient::new(state.require_redis()?.clone());
-    nonce_mod::check_nonce(&redis_client, &h.sa_id_str, &h.nonce, state.config.auth.timestamp_skew_secs).await?;
+    nonce_mod::check_nonce(
+        &redis_client,
+        &h.sa_id_str,
+        &h.nonce,
+        state.config.auth.timestamp_skew_secs,
+    )
+    .await?;
 
     // 8. Fire-and-forget: update last_used_at
     let key_id_for_update = key.id;
@@ -240,7 +255,10 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.status_code(), axum::http::StatusCode::UNAUTHORIZED);
         let msg = err.to_string();
-        assert!(msg.contains("x-key-id"), "error should mention header name: {msg}");
+        assert!(
+            msg.contains("x-key-id"),
+            "error should mention header name: {msg}"
+        );
     }
 
     #[test]

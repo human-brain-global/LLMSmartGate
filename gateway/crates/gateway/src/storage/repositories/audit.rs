@@ -140,9 +140,7 @@ impl AuditRepo {
         // When a cursor is present, filter for rows strictly before it.
         let (cursor_ts, cursor_id) = match cursor {
             Some(c) => {
-                let (ts, id) = c
-                    .decode()
-                    .map_err(StorageError::InvalidCursor)?;
+                let (ts, id) = c.decode().map_err(StorageError::InvalidCursor)?;
                 (Some(ts), Some(id))
             }
             None => (None, None),

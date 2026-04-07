@@ -23,8 +23,9 @@ impl Secret {
         &self.0
     }
 
-    /// Create a Secret for testing purposes.
+    /// Create a Secret for testing purposes (used by storage/redis tests).
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn for_test(s: impl Into<String>) -> Self {
         Self(s.into())
     }

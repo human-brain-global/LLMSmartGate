@@ -483,10 +483,7 @@ mod tests {
         let (decoded_ts, decoded_id) = cursor.decode().expect("decode should succeed");
         assert_eq!(decoded_id, id);
         // Compare at millisecond precision (RFC 3339 can lose sub-ms).
-        assert_eq!(
-            decoded_ts.timestamp_millis(),
-            now.timestamp_millis(),
-        );
+        assert_eq!(decoded_ts.timestamp_millis(), now.timestamp_millis(),);
     }
 
     #[test]

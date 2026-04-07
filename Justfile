@@ -13,6 +13,9 @@ check-all: check-gateway check-admin check-sdk
 
 # ── Gateway (Rust) ──
 
+# Load .env if present for database/redis URLs needed by integration tests
+set dotenv-load
+
 check-gateway:
     cd gateway && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
 
