@@ -38,9 +38,11 @@ just dev-admin       # Run admin console locally
 - No aws-lc-sys -- ring as rustls crypto provider.
 - Svelte 5 Runes only (`$state`, `$derived`, `$props`). API calls via `+page.server.ts`.
 - Conventional Commits: `feat(auth):`, `fix(streaming):`, `chore(deps):`
+- Fix bugs: MUST Debug to find the root causes, ONLY propose and implement long-terms solutions 
 - Trunk-based dev, squash merge, short-lived branches.
-
+/
 ## Quality Checklist
+- [ ]**Code**: Clean Code standard
 - [ ] **Perf**: no blocking I/O, no unnecessary clones, hot paths cached, benchmarked
 - [ ] **Security**: fail-safe, no secrets, parameterized SQL, auth on new endpoints, audit emitted
 - [ ] **Gateway**: fmt + clippy + tests pass, coverage >= 80% core, no unwrap/unsafe
