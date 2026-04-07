@@ -36,10 +36,17 @@ impl AdminRole {
     ///
     /// Returns `GatewayError::Auth` if the role string is not recognised.
     fn from_db_str(s: &str) -> Result<Self, GatewayError> {
-        serde_json::from_value::<Self>(serde_json::Value::String(s.to_owned())).map_err(|_| {
-            tracing::warn!(role = %s, "unknown admin role in database");
-            GatewayError::auth("invalid_role", "unrecognized admin role")
-        })
+        match s {
+            "admin" => Ok(Self::Admin),
+            "viewer" => Ok(Self::Viewer),
+            _ => {
+                tracing::warn!(role = %s, "unknown admin role in database");
+                Err(GatewayError::auth(
+                    "invalid_role",
+                    "unrecognized admin role",
+                ))
+            }
+        }
     }
 }
 
@@ -155,32 +162,55 @@ pub async fn admin_auth_middleware(
         ));
     }
 
-    // Verify the provided token against ALL keys' bcrypt hashes to prevent
-    // timing side-channels that leak which key slot matched.
+    // Verify the provided token against ALL keys' bcrypt hashes concurrently
+    // to prevent timing side-channels that leak which key slot matched.
     // bcrypt::verify is CPU-bound, so we use spawn_blocking.
+    // All verifications run in parallel and complete before checking results.
     // TODO: For large key sets, add key_prefix column for O(1) lookup.
-    let mut matched_key = None;
     let token_owned = token.to_owned();
-    for key in &keys {
+    let mut join_set = tokio::task::JoinSet::new();
+    for (idx, key) in keys.iter().enumerate() {
         let provided = token_owned.clone();
         let hash = key.key_hash.clone();
-        let is_match = tokio::task::spawn_blocking(move || bcrypt::verify(provided, &hash))
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "bcrypt task panicked");
-                GatewayError::auth("internal_error", "authentication verification failed")
-            })?
-            .map_err(|e| {
-                tracing::error!(error = %e, "bcrypt verify error");
-                GatewayError::auth("internal_error", "authentication verification failed")
-            })?;
+        join_set.spawn_blocking(move || (idx, bcrypt::verify(provided, &hash)));
+    }
 
-        if is_match && matched_key.is_none() {
-            matched_key = Some(key);
+    // Drain all tasks before checking results — timing-safe, no orphaned tasks.
+    let mut matched_idx = None;
+    let mut auth_error: Option<GatewayError> = None;
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Err(e) => {
+                tracing::error!(error = %e, "bcrypt task panicked");
+                if auth_error.is_none() {
+                    auth_error = Some(GatewayError::auth(
+                        "internal_error",
+                        "authentication verification failed",
+                    ));
+                }
+            }
+            Ok((_idx, Err(e))) => {
+                tracing::error!(error = %e, "bcrypt verify error");
+                if auth_error.is_none() {
+                    auth_error = Some(GatewayError::auth(
+                        "internal_error",
+                        "authentication verification failed",
+                    ));
+                }
+            }
+            Ok((idx, Ok(is_match))) => {
+                if is_match && matched_idx.is_none() {
+                    matched_idx = Some(idx);
+                }
+            }
         }
     }
 
-    let key = matched_key.ok_or_else(|| {
+    if let Some(err) = auth_error {
+        return Err(err);
+    }
+
+    let key = matched_idx.and_then(|idx| keys.get(idx)).ok_or_else(|| {
         tracing::warn!("admin auth failed: no matching key");
         GatewayError::auth("invalid_api_key", "invalid admin API key")
     })?;
@@ -365,6 +395,7 @@ mod tests {
             redis: None,
             key_store: None,
             admin_key_cache: None,
+            policy_cache: None,
         };
 
         let app = Router::new()
@@ -417,6 +448,7 @@ mod tests {
             redis: None,
             key_store: None,
             admin_key_cache: None,
+            policy_cache: None,
         };
 
         let app = Router::new()
@@ -453,6 +485,7 @@ mod tests {
             redis: None,
             key_store: None,
             admin_key_cache: None,
+            policy_cache: None,
         };
 
         let app = Router::new()
@@ -501,6 +534,7 @@ mod tests {
             redis: None,
             key_store: None,
             admin_key_cache: None,
+            policy_cache: None,
         };
 
         let app = Router::new()
@@ -566,6 +600,7 @@ mod tests {
             redis: None,
             key_store: None,
             admin_key_cache: None,
+            policy_cache: None,
         };
 
         let app = Router::new()

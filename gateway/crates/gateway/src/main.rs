@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use llmsmartgate::config::GatewayConfig;
+use llmsmartgate::policy::engine::PolicyCache;
 use llmsmartgate::server::{AppState, build_router};
 
 #[tokio::main]
@@ -22,17 +23,23 @@ async fn main() -> anyhow::Result<()> {
         pg_pool_size = config.database.pool_size,
         valkey_pool_size = config.redis.pool_size,
         timestamp_skew_secs = config.auth.timestamp_skew_secs,
+        admin_key_cache_ttl_secs = config.auth.admin_key_cache_ttl_secs,
+        policy_cache_ttl_secs = config.policy.cache_ttl_secs,
         provider_timeout_ms = config.provider.timeout_ms,
         log_level = %config.observability.log_level,
         "Configuration loaded"
     );
 
     let addr = SocketAddr::from((config.server.host, config.server.port));
-    // Admin key cache: 30-second TTL, single entry
+    // Admin key cache: configurable TTL, single entry
     let admin_key_cache = moka::future::Cache::builder()
-        .time_to_live(std::time::Duration::from_secs(30))
+        .time_to_live(std::time::Duration::from_secs(
+            config.auth.admin_key_cache_ttl_secs,
+        ))
         .max_capacity(1)
         .build();
+
+    let policy_cache = PolicyCache::new(config.policy.cache_ttl_secs);
 
     let state = AppState {
         config: Arc::new(config),
@@ -40,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         redis: None,
         key_store: None,
         admin_key_cache: Some(admin_key_cache),
+        policy_cache: Some(policy_cache),
     };
     let app = build_router(state);
 
@@ -59,18 +67,28 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler");
-
-        tokio::select! {
-            _ = ctrl_c => { tracing::info!("Received SIGINT, shutting down"); }
-            _ = sigterm.recv() => { tracing::info!("Received SIGTERM, shutting down"); }
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = ctrl_c => { tracing::info!("Received SIGINT, shutting down"); }
+                    _ = sigterm.recv() => { tracing::info!("Received SIGTERM, shutting down"); }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to install SIGTERM handler, falling back to SIGINT only");
+                if let Err(e) = ctrl_c.await {
+                    tracing::error!(error = %e, "failed to listen for ctrl-c");
+                }
+                tracing::info!("Received SIGINT, shutting down");
+            }
         }
     }
 
     #[cfg(not(unix))]
     {
-        ctrl_c.await.expect("failed to listen for ctrl-c");
+        if let Err(e) = ctrl_c.await {
+            tracing::error!(error = %e, "failed to listen for ctrl-c");
+        }
         tracing::info!("Received SIGINT, shutting down");
     }
 }

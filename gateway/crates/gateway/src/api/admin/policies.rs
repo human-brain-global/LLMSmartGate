@@ -14,7 +14,8 @@ use crate::storage::repositories::policies::PolicyRepo;
 use crate::types::{PolicyId, ServiceAccountId, TenantId};
 
 use super::{
-    AdminContext, emit_audit, map_storage_error, require_admin_role, validate_limit, validate_name,
+    AdminContext, emit_audit, map_storage_error, require_admin_role, validate_limit,
+    validate_models_json, validate_name, validate_positive_limit, validate_token_limit,
 };
 
 // ---------------------------------------------------------------------------
@@ -85,6 +86,24 @@ pub async fn create_policy(
 ) -> Result<impl IntoResponse, GatewayError> {
     require_admin_role(&admin_ctx)?;
     validate_name(&body.name)?;
+    if let Some(ref v) = body.allowed_models_json {
+        validate_models_json(v, "allowed_models_json")?;
+    }
+    if let Some(ref v) = body.denied_models_json {
+        validate_models_json(v, "denied_models_json")?;
+    }
+    if let Some(v) = body.max_input_tokens {
+        validate_token_limit(v, "max_input_tokens")?;
+    }
+    if let Some(v) = body.max_output_tokens {
+        validate_token_limit(v, "max_output_tokens")?;
+    }
+    if let Some(v) = body.rpm_limit {
+        validate_positive_limit(v, "rpm_limit")?;
+    }
+    if let Some(v) = body.concurrency_limit {
+        validate_positive_limit(v, "concurrency_limit")?;
+    }
 
     let pool = state.require_db()?;
     let repo = PolicyRepo::new(pool.clone());
@@ -107,6 +126,12 @@ pub async fn create_policy(
 
     let policy = repo.create(&input).await.map_err(map_storage_error)?;
 
+    // Invalidate policy cache -- new policy may be a default_policy_id target
+    if let Some(ref cache) = state.policy_cache {
+        cache.invalidate_all().await;
+        tracing::debug!(policy_id = %policy.id, "policy cache invalidated: policy created");
+    }
+
     tracing::info!(admin_id = %admin_ctx.admin_id, policy_id = %policy.id, action = "policy.created", "admin operation");
     emit_audit(
         pool,
@@ -115,13 +140,15 @@ pub async fn create_policy(
         "policy.created",
         "policy",
         policy.id.0.to_string(),
-        serde_json::json!({}),
+        serde_json::json!({"name": policy.name, "tenant_id": policy.tenant_id.to_string()}),
     );
 
     Ok((StatusCode::CREATED, Json(policy)))
 }
 
 /// GET /admin/v1/policies
+///
+/// Both Admin and Viewer roles are permitted (read-only operation).
 ///
 /// # Errors
 ///
@@ -147,6 +174,8 @@ pub async fn list_policies(
 }
 
 /// GET /admin/v1/policies/:id
+///
+/// Both Admin and Viewer roles are permitted (read-only operation).
 ///
 /// # Errors
 ///
@@ -188,6 +217,24 @@ pub async fn update_policy(
     if let Some(ref name) = body.name {
         validate_name(name)?;
     }
+    if let Some(ref v) = body.allowed_models_json {
+        validate_models_json(v, "allowed_models_json")?;
+    }
+    if let Some(ref v) = body.denied_models_json {
+        validate_models_json(v, "denied_models_json")?;
+    }
+    if let Some(v) = body.max_input_tokens {
+        validate_token_limit(v, "max_input_tokens")?;
+    }
+    if let Some(v) = body.max_output_tokens {
+        validate_token_limit(v, "max_output_tokens")?;
+    }
+    if let Some(v) = body.rpm_limit {
+        validate_positive_limit(v, "rpm_limit")?;
+    }
+    if let Some(v) = body.concurrency_limit {
+        validate_positive_limit(v, "concurrency_limit")?;
+    }
 
     let pool = state.require_db()?;
     let repo = PolicyRepo::new(pool.clone());
@@ -215,6 +262,12 @@ pub async fn update_policy(
         .await
         .map_err(map_storage_error)?;
 
+    // Invalidate policy cache -- we don't know which SAs use this policy
+    if let Some(ref cache) = state.policy_cache {
+        cache.invalidate_all().await;
+        tracing::debug!(policy_id = %id, "policy cache invalidated: policy updated");
+    }
+
     tracing::info!(admin_id = %admin_ctx.admin_id, policy_id = %id, action = "policy.updated", "admin operation");
     emit_audit(
         pool,
@@ -223,7 +276,7 @@ pub async fn update_policy(
         "policy.updated",
         "policy",
         policy.id.0.to_string(),
-        serde_json::json!({}),
+        serde_json::json!({"name": policy.name}),
     );
 
     Ok(Json(policy))
@@ -258,6 +311,12 @@ pub async fn delete_policy(
         _ => map_storage_error(e),
     })?;
 
+    // Invalidate policy cache -- policy was deleted
+    if let Some(ref cache) = state.policy_cache {
+        cache.invalidate_all().await;
+        tracing::debug!(policy_id = %id, "policy cache invalidated: policy deleted");
+    }
+
     tracing::info!(admin_id = %admin_ctx.admin_id, policy_id = %id, action = "policy.deleted", "admin operation");
     emit_audit(
         pool,
@@ -266,7 +325,7 @@ pub async fn delete_policy(
         "policy.deleted",
         "policy",
         id.to_string(),
-        serde_json::json!({}),
+        serde_json::json!({"tenant_id": query.tenant_id.to_string()}),
     );
 
     Ok(StatusCode::NO_CONTENT)
@@ -300,6 +359,12 @@ pub async fn create_binding(
         .await
         .map_err(map_storage_error)?;
 
+    // Invalidate this SA's cached policy evaluation
+    if let Some(ref cache) = state.policy_cache {
+        cache.invalidate(&ServiceAccountId::from_uuid(sa_id)).await;
+        tracing::debug!(service_account_id = %sa_id, "policy cache invalidated: binding created");
+    }
+
     tracing::info!(admin_id = %admin_ctx.admin_id, service_account_id = %sa_id, policy_id = %body.policy_id, action = "policy_binding.created", "admin operation");
     emit_audit(
         pool,
@@ -308,7 +373,7 @@ pub async fn create_binding(
         "policy_binding.created",
         "policy_binding",
         format!("{sa_id}/{}", body.policy_id),
-        serde_json::json!({"binding_id": binding.id.to_string(), "service_account_id": sa_id.to_string(), "policy_id": body.policy_id.to_string()}),
+        serde_json::json!({"service_account_id": sa_id.to_string(), "policy_id": body.policy_id.to_string()}),
     );
 
     Ok((StatusCode::CREATED, Json(binding)))
@@ -338,6 +403,12 @@ pub async fn delete_binding(
     )
     .await
     .map_err(map_storage_error)?;
+
+    // Invalidate this SA's cached policy evaluation
+    if let Some(ref cache) = state.policy_cache {
+        cache.invalidate(&ServiceAccountId::from_uuid(sa_id)).await;
+        tracing::debug!(service_account_id = %sa_id, "policy cache invalidated: binding deleted");
+    }
 
     tracing::info!(admin_id = %admin_ctx.admin_id, service_account_id = %sa_id, policy_id = %policy_id, action = "policy_binding.deleted", "admin operation");
     emit_audit(

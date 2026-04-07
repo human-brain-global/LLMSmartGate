@@ -253,6 +253,97 @@ pub(crate) fn validate_slug(slug: &str) -> Result<(), GatewayError> {
     Ok(())
 }
 
+/// Validate that a JSON value is an array of strings (for model allowlists/denylists).
+///
+/// # Errors
+///
+/// Returns `GatewayError::Validation` if the value is not a JSON array of strings.
+pub(crate) fn validate_models_json(
+    value: &serde_json::Value,
+    field: &str,
+) -> Result<(), GatewayError> {
+    let arr = value.as_array().ok_or_else(|| {
+        GatewayError::validation(
+            format!("invalid_{field}"),
+            format!("{field} must be a JSON array of strings"),
+        )
+    })?;
+    for (i, item) in arr.iter().enumerate() {
+        let s = item.as_str().ok_or_else(|| {
+            GatewayError::validation(
+                format!("invalid_{field}"),
+                format!("{field}[{i}] must be a string"),
+            )
+        })?;
+        // Strip at most one trailing glob wildcard, then validate the base.
+        // validate_model_identifier rejects '*' via its charset check, so
+        // interior wildcards (e.g. "gpt-4*-turbo") and double wildcards
+        // ("**") are caught by that call.
+        let base = s.strip_suffix('*').unwrap_or(s);
+        if !base.is_empty() {
+            validate_model_identifier(base, &format!("{field}[{i}]"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Maximum allowed token limit (1 million tokens).
+const MAX_TOKEN_LIMIT: i32 = 1_000_000;
+
+/// Validate that a token limit is within range (1..=1_000_000).
+///
+/// # Errors
+///
+/// Returns `GatewayError::Validation` if the value is zero, negative, or
+/// exceeds the maximum allowed limit.
+pub(crate) fn validate_token_limit(value: i32, field: &str) -> Result<(), GatewayError> {
+    if value <= 0 {
+        return Err(GatewayError::validation(
+            format!("invalid_{field}"),
+            format!("{field} must be a positive integer, got {value}"),
+        ));
+    }
+    if value > MAX_TOKEN_LIMIT {
+        return Err(GatewayError::validation(
+            format!("invalid_{field}"),
+            format!("{field} must not exceed {MAX_TOKEN_LIMIT}, got {value}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Maximum allowed RPM limit.
+const MAX_RPM_LIMIT: i32 = 100_000;
+/// Maximum allowed concurrency limit.
+const MAX_CONCURRENCY_LIMIT: i32 = 10_000;
+
+/// Validate that a rate/concurrency limit is within a sensible range.
+///
+/// # Errors
+///
+/// Returns `GatewayError::Validation` if the value is zero, negative, or
+/// exceeds the field-specific maximum.
+pub(crate) fn validate_positive_limit(value: i32, field: &str) -> Result<(), GatewayError> {
+    if value <= 0 {
+        return Err(GatewayError::validation(
+            format!("invalid_{field}"),
+            format!("{field} must be a positive integer, got {value}"),
+        ));
+    }
+    let max = if field.contains("concurrency") {
+        MAX_CONCURRENCY_LIMIT
+    } else {
+        MAX_RPM_LIMIT
+    };
+    if value > max {
+        return Err(GatewayError::validation(
+            format!("invalid_{field}"),
+            format!("{field} must not exceed {max}, got {value}"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +469,99 @@ mod tests {
     #[test]
     fn validate_limit_rejects_too_high() {
         assert!(validate_limit(Some(201)).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_models_json
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_models_json_accepts_valid() {
+        assert!(validate_models_json(&serde_json::json!([]), "test").is_ok());
+        assert!(validate_models_json(&serde_json::json!(["gpt-4", "claude-3*"]), "test").is_ok());
+        assert!(validate_models_json(&serde_json::json!(["*"]), "test").is_ok());
+        assert!(validate_models_json(&serde_json::json!(["meta/llama-3:8b*"]), "test").is_ok());
+    }
+
+    #[test]
+    fn validate_models_json_rejects_non_array() {
+        assert!(validate_models_json(&serde_json::json!("not-array"), "test").is_err());
+        assert!(validate_models_json(&serde_json::json!(null), "test").is_err());
+        assert!(validate_models_json(&serde_json::json!({}), "test").is_err());
+    }
+
+    #[test]
+    fn validate_models_json_rejects_non_string_elements() {
+        assert!(validate_models_json(&serde_json::json!([1, 2]), "test").is_err());
+        assert!(validate_models_json(&serde_json::json!(["ok", null]), "test").is_err());
+    }
+
+    #[test]
+    fn validate_models_json_rejects_invalid_model_content() {
+        // Spaces
+        assert!(validate_models_json(&serde_json::json!(["gpt 4"]), "test").is_err());
+        // Control characters
+        assert!(validate_models_json(&serde_json::json!(["gpt-4\x00bad"]), "test").is_err());
+        // Special characters
+        assert!(validate_models_json(&serde_json::json!(["model@evil"]), "test").is_err());
+        // Double asterisk
+        assert!(validate_models_json(&serde_json::json!(["**"]), "test").is_err());
+        // Interior wildcard
+        assert!(validate_models_json(&serde_json::json!(["gpt-4*-turbo"]), "test").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_token_limit
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_token_limit_accepts_positive() {
+        assert!(validate_token_limit(1, "test").is_ok());
+        assert!(validate_token_limit(4096, "test").is_ok());
+        assert!(validate_token_limit(1_000_000, "test").is_ok());
+    }
+
+    #[test]
+    fn validate_token_limit_rejects_zero_and_negative() {
+        assert!(validate_token_limit(0, "test").is_err());
+        assert!(validate_token_limit(-1, "test").is_err());
+        assert!(validate_token_limit(i32::MIN, "test").is_err());
+    }
+
+    #[test]
+    fn validate_token_limit_rejects_exceeding_max() {
+        assert!(validate_token_limit(1_000_001, "test").is_err());
+        assert!(validate_token_limit(i32::MAX, "test").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_positive_limit
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_positive_limit_accepts_valid_rpm() {
+        assert!(validate_positive_limit(1, "rpm_limit").is_ok());
+        assert!(validate_positive_limit(60, "rpm_limit").is_ok());
+        assert!(validate_positive_limit(100_000, "rpm_limit").is_ok());
+    }
+
+    #[test]
+    fn validate_positive_limit_accepts_valid_concurrency() {
+        assert!(validate_positive_limit(1, "concurrency_limit").is_ok());
+        assert!(validate_positive_limit(10_000, "concurrency_limit").is_ok());
+    }
+
+    #[test]
+    fn validate_positive_limit_rejects_zero_and_negative() {
+        assert!(validate_positive_limit(0, "rpm_limit").is_err());
+        assert!(validate_positive_limit(-1, "rpm_limit").is_err());
+        assert!(validate_positive_limit(i32::MIN, "concurrency_limit").is_err());
+    }
+
+    #[test]
+    fn validate_positive_limit_rejects_exceeding_max() {
+        assert!(validate_positive_limit(100_001, "rpm_limit").is_err());
+        assert!(validate_positive_limit(10_001, "concurrency_limit").is_err());
+        assert!(validate_positive_limit(i32::MAX, "rpm_limit").is_err());
     }
 }

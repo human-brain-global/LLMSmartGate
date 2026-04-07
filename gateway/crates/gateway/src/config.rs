@@ -62,6 +62,7 @@ pub struct GatewayConfig {
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
     pub auth: AuthConfig,
+    pub policy: PolicyConfig,
     pub provider: ProviderConfig,
     pub observability: ObservabilityConfig,
 }
@@ -106,19 +107,18 @@ impl fmt::Debug for RedisConfig {
 }
 
 /// Authentication and signing configuration.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct AuthConfig {
-    pub admin_jwt_secret: Secret,
     pub timestamp_skew_secs: u64,
+    /// TTL for the admin API key cache (seconds).
+    pub admin_key_cache_ttl_secs: u64,
 }
 
-impl fmt::Debug for AuthConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AuthConfig")
-            .field("admin_jwt_secret", &self.admin_jwt_secret)
-            .field("timestamp_skew_secs", &self.timestamp_skew_secs)
-            .finish()
-    }
+/// Policy engine configuration.
+#[derive(Debug, Clone)]
+pub struct PolicyConfig {
+    /// TTL for the in-memory policy evaluation cache (seconds).
+    pub cache_ttl_secs: u64,
 }
 
 /// Provider communication configuration.
@@ -152,8 +152,11 @@ impl Default for GatewayConfig {
                 pool_size: DEFAULT_VALKEY_POOL_SIZE,
             },
             auth: AuthConfig {
-                admin_jwt_secret: Secret("test-secret".to_owned()),
                 timestamp_skew_secs: DEFAULT_TIMESTAMP_SKEW_SECS,
+                admin_key_cache_ttl_secs: DEFAULT_ADMIN_KEY_CACHE_TTL_SECS,
+            },
+            policy: PolicyConfig {
+                cache_ttl_secs: DEFAULT_POLICY_CACHE_TTL_SECS,
             },
             provider: ProviderConfig {
                 timeout_ms: DEFAULT_PROVIDER_TIMEOUT_MS,
@@ -175,6 +178,8 @@ const DEFAULT_PG_POOL_SIZE: u32 = 20;
 const DEFAULT_VALKEY_POOL_SIZE: u32 = 10;
 const DEFAULT_TIMESTAMP_SKEW_SECS: u64 = 300;
 const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_POLICY_CACHE_TTL_SECS: u64 = 30;
+const DEFAULT_ADMIN_KEY_CACHE_TTL_SECS: u64 = 30;
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_SERVICE_NAME: &str = "llmsmartgate";
 
@@ -226,7 +231,6 @@ where
 fn load_from(source: &dyn ConfigSource) -> Result<GatewayConfig, ConfigError> {
     let database_url = required(source, "DATABASE_URL")?;
     let valkey_url = required(source, "VALKEY_URL")?;
-    let admin_jwt_secret = required(source, "LLMSMARTGATE_ADMIN_JWT_SECRET")?;
 
     let host_str = optional(source, "LLMSMARTGATE_HOST", DEFAULT_HOST);
     let host = host_str
@@ -254,6 +258,18 @@ fn load_from(source: &dyn ConfigSource) -> Result<GatewayConfig, ConfigError> {
         DEFAULT_PROVIDER_TIMEOUT_MS,
     )?;
 
+    let policy_cache_ttl_secs: u64 = parse_val(
+        source,
+        "LLMSMARTGATE_POLICY_CACHE_TTL_SECS",
+        DEFAULT_POLICY_CACHE_TTL_SECS,
+    )?;
+
+    let admin_key_cache_ttl_secs: u64 = parse_val(
+        source,
+        "LLMSMARTGATE_ADMIN_KEY_CACHE_TTL_SECS",
+        DEFAULT_ADMIN_KEY_CACHE_TTL_SECS,
+    )?;
+
     let log_level = optional(source, "RUST_LOG", DEFAULT_LOG_LEVEL);
     let otel_endpoint = source.get("OTEL_EXPORTER_OTLP_ENDPOINT");
     let service_name = optional(source, "OTEL_SERVICE_NAME", DEFAULT_SERVICE_NAME);
@@ -269,8 +285,11 @@ fn load_from(source: &dyn ConfigSource) -> Result<GatewayConfig, ConfigError> {
             pool_size: valkey_pool_size,
         },
         auth: AuthConfig {
-            admin_jwt_secret: Secret(admin_jwt_secret),
             timestamp_skew_secs,
+            admin_key_cache_ttl_secs,
+        },
+        policy: PolicyConfig {
+            cache_ttl_secs: policy_cache_ttl_secs,
         },
         provider: ProviderConfig {
             timeout_ms: provider_timeout_ms,
@@ -289,7 +308,6 @@ impl GatewayConfig {
     /// Required variables:
     /// - `DATABASE_URL` -- PostgreSQL connection string
     /// - `VALKEY_URL` -- Redis/Valkey connection string
-    /// - `LLMSMARTGATE_ADMIN_JWT_SECRET` -- JWT signing secret for admin API
     ///
     /// Optional (with defaults):
     /// - `LLMSMARTGATE_HOST` (default: `0.0.0.0`)
@@ -341,7 +359,6 @@ mod tests {
         MapSource::new()
             .set("DATABASE_URL", "postgres://test:test@localhost:5432/testdb")
             .set("VALKEY_URL", "redis://localhost:6379")
-            .set("LLMSMARTGATE_ADMIN_JWT_SECRET", "test-jwt-secret")
             .set("LLMSMARTGATE_HOST", "127.0.0.1")
             .set("LLMSMARTGATE_PORT", "9090")
             .set("LLMSMARTGATE_PG_POOL_SIZE", "5")
@@ -351,6 +368,8 @@ mod tests {
             .set("RUST_LOG", "debug")
             .set("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
             .set("OTEL_SERVICE_NAME", "test-gateway")
+            .set("LLMSMARTGATE_POLICY_CACHE_TTL_SECS", "60")
+            .set("LLMSMARTGATE_ADMIN_KEY_CACHE_TTL_SECS", "15")
     }
 
     /// Returns a `MapSource` with only required fields set.
@@ -358,7 +377,6 @@ mod tests {
         MapSource::new()
             .set("DATABASE_URL", "postgres://test:test@localhost:5432/testdb")
             .set("VALKEY_URL", "redis://localhost:6379")
-            .set("LLMSMARTGATE_ADMIN_JWT_SECRET", "test-jwt-secret")
     }
 
     #[test]
@@ -378,8 +396,8 @@ mod tests {
         assert_eq!(config.database.pool_size, 5);
         assert_eq!(config.redis.url.expose(), "redis://localhost:6379");
         assert_eq!(config.redis.pool_size, 3);
-        assert_eq!(config.auth.admin_jwt_secret.expose(), "test-jwt-secret");
         assert_eq!(config.auth.timestamp_skew_secs, 600);
+        assert_eq!(config.auth.admin_key_cache_ttl_secs, 15);
         assert_eq!(config.provider.timeout_ms, 15_000);
         assert_eq!(config.observability.log_level, "debug");
         assert_eq!(
@@ -387,6 +405,7 @@ mod tests {
             Some("http://localhost:4317")
         );
         assert_eq!(config.observability.service_name, "test-gateway");
+        assert_eq!(config.policy.cache_ttl_secs, 60);
     }
 
     #[test]
@@ -410,9 +429,7 @@ mod tests {
 
     #[test]
     fn missing_database_url_returns_error() {
-        let source = MapSource::new()
-            .set("VALKEY_URL", "redis://localhost:6379")
-            .set("LLMSMARTGATE_ADMIN_JWT_SECRET", "test-jwt-secret");
+        let source = MapSource::new().set("VALKEY_URL", "redis://localhost:6379");
 
         let result = load_from(&source);
         assert!(result.is_err());
@@ -427,9 +444,8 @@ mod tests {
 
     #[test]
     fn missing_valkey_url_returns_error() {
-        let source = MapSource::new()
-            .set("DATABASE_URL", "postgres://test:test@localhost:5432/testdb")
-            .set("LLMSMARTGATE_ADMIN_JWT_SECRET", "test-jwt-secret");
+        let source =
+            MapSource::new().set("DATABASE_URL", "postgres://test:test@localhost:5432/testdb");
 
         let result = load_from(&source);
         assert!(result.is_err());
@@ -439,23 +455,6 @@ mod tests {
         assert!(
             msg.contains("VALKEY_URL"),
             "error should mention VALKEY_URL, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn missing_admin_jwt_secret_returns_error() {
-        let source = MapSource::new()
-            .set("DATABASE_URL", "postgres://test:test@localhost:5432/testdb")
-            .set("VALKEY_URL", "redis://localhost:6379");
-
-        let result = load_from(&source);
-        assert!(result.is_err());
-
-        let err = result.expect_err("should fail");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("LLMSMARTGATE_ADMIN_JWT_SECRET"),
-            "error should mention LLMSMARTGATE_ADMIN_JWT_SECRET, got: {msg}"
         );
     }
 
@@ -473,10 +472,6 @@ mod tests {
         assert!(
             !debug_output.contains("redis://localhost:6379"),
             "Valkey URL should be redacted in Debug output"
-        );
-        assert!(
-            !debug_output.contains("test-jwt-secret"),
-            "JWT secret should be redacted in Debug output"
         );
 
         // The redaction marker should appear instead

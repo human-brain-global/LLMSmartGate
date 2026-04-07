@@ -20,6 +20,7 @@ use crate::auth::key_store::KeyStore;
 use crate::config::GatewayConfig;
 use crate::error::GatewayError;
 use crate::models::AdminApiKey;
+use crate::policy::engine::PolicyCache;
 
 /// Header name used for request ID propagation.
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -41,6 +42,8 @@ pub struct AppState {
     /// Cache for admin API keys (unit key since there is only one entry set).
     /// 30-second TTL. `None` in unit tests.
     pub admin_key_cache: Option<moka::future::Cache<(), Vec<AdminApiKey>>>,
+    /// In-memory policy evaluation cache. `None` in unit tests.
+    pub policy_cache: Option<PolicyCache>,
 }
 
 impl AppState {
@@ -77,6 +80,18 @@ impl AppState {
         self.key_store.as_ref().ok_or_else(|| {
             tracing::warn!("key store not available");
             GatewayError::config("internal_error", "key store not available")
+        })
+    }
+
+    /// Get the policy cache, or return 500 if not initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GatewayError::Config` with code `internal_error` if the cache is `None`.
+    pub fn require_policy_cache(&self) -> Result<&PolicyCache, GatewayError> {
+        self.policy_cache.as_ref().ok_or_else(|| {
+            tracing::warn!("policy cache not available");
+            GatewayError::config("internal_error", "policy cache not available")
         })
     }
 }
@@ -226,6 +241,7 @@ mod tests {
             redis: None,
             key_store: None,
             admin_key_cache: None,
+            policy_cache: None,
         }
     }
 
