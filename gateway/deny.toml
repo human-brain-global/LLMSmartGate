@@ -1,6 +1,14 @@
 [advisories]
 vulnerability = "deny"
 unmaintained = "warn"
+ignore = [
+    # RUSTSEC-2023-0071: Marvin Attack timing sidechannel in `rsa` crate.
+    # `rsa` is a phantom entry in Cargo.lock via sqlx-macros-core's optional
+    # sqlx-mysql dep. It is never compiled or linked (verified: `cargo tree -i
+    # sqlx-mysql` prints nothing). No upstream fix available; sqlx 0.9 will
+    # properly feature-gate backends. Safe to ignore.
+    "RUSTSEC-2023-0071",
+]
 
 [licenses]
 unlicensed = "deny"
