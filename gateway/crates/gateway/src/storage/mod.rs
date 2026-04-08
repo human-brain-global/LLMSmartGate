@@ -30,6 +30,9 @@ pub enum StorageError {
 
     #[error("redis error: {0}")]
     Redis(String),
+
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl StorageError {

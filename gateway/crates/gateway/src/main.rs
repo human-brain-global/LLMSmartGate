@@ -5,10 +5,14 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use llmsmartgate::auth::key_store::KeyStore;
 use llmsmartgate::config::GatewayConfig;
+use llmsmartgate::policy::concurrency::ConcurrencyLimiter;
 use llmsmartgate::policy::engine::PolicyCache;
 use llmsmartgate::policy::rate_limit::RateLimitEvaluator;
 use llmsmartgate::server::{AppState, build_router};
+use llmsmartgate::storage::postgres::create_pg_pool;
+use llmsmartgate::storage::redis::{RedisClient, create_redis_pool};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,6 +36,15 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let addr = SocketAddr::from((config.server.host, config.server.port));
+
+    // Initialize connection pools
+    let db = create_pg_pool(&config.database).await?;
+    let redis_pool = create_redis_pool(&config.redis)?;
+
+    // Key store: moka L1 → Redis L2 → PostgreSQL L3
+    let redis_client = RedisClient::new(redis_pool.clone());
+    let key_store = KeyStore::new(db.clone(), Some(redis_client));
+
     // Admin key cache: configurable TTL, single entry
     let admin_key_cache = moka::future::Cache::builder()
         .time_to_live(std::time::Duration::from_secs(
@@ -42,16 +55,17 @@ async fn main() -> anyhow::Result<()> {
 
     let policy_cache = PolicyCache::new(config.policy.cache_ttl_secs);
     let rate_limit_evaluator = RateLimitEvaluator::new(&config.rate_limit);
+    let concurrency_limiter = ConcurrencyLimiter::new(redis_pool.clone());
 
     let state = AppState {
         config: Arc::new(config),
-        db: None,
-        redis: None,
-        key_store: None,
+        db: Some(db),
+        redis: Some(redis_pool),
+        key_store: Some(key_store),
         admin_key_cache: Some(admin_key_cache),
         policy_cache: Some(policy_cache),
         rate_limit_evaluator: Some(rate_limit_evaluator),
-        concurrency_limiter: None, // initialized when Redis pool is available
+        concurrency_limiter: Some(concurrency_limiter),
     };
     let app = build_router(state);
 
