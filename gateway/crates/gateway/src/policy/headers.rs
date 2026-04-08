@@ -8,20 +8,27 @@ use axum::response::Response;
 
 use super::rate_limit::RateLimitOutcome;
 
+/// Convert a numeric value to a `HeaderValue`.
+///
+/// Decimal digit strings are always valid header values, so this is infallible.
+fn header_from_u64(n: u64) -> HeaderValue {
+    HeaderValue::from_str(&n.to_string())
+        .expect("decimal digit string is always a valid header value")
+}
+
 /// Inject rate limit headers into a response.
 pub fn inject_rate_limit_headers(mut response: Response, outcome: &RateLimitOutcome) -> Response {
     let headers = response.headers_mut();
 
-    // These conversions are infallible for numeric strings.
-    if let Ok(v) = HeaderValue::from_str(&outcome.limit.to_string()) {
-        headers.insert("x-ratelimit-limit", v);
-    }
-    if let Ok(v) = HeaderValue::from_str(&outcome.remaining.to_string()) {
-        headers.insert("x-ratelimit-remaining", v);
-    }
-    if let Ok(v) = HeaderValue::from_str(&outcome.reset_at.to_string()) {
-        headers.insert("x-ratelimit-reset", v);
-    }
+    headers.insert(
+        "x-ratelimit-limit",
+        header_from_u64(u64::from(outcome.limit)),
+    );
+    headers.insert(
+        "x-ratelimit-remaining",
+        header_from_u64(u64::from(outcome.remaining)),
+    );
+    headers.insert("x-ratelimit-reset", header_from_u64(outcome.reset_at));
 
     response
 }
@@ -48,7 +55,6 @@ mod tests {
             limit: 1000,
             remaining: 999,
             reset_at: 1_700_000_000,
-            rejected_by: None,
         };
 
         let response = inject_rate_limit_headers(make_response(), &outcome);
@@ -65,7 +71,6 @@ mod tests {
             limit: 100,
             remaining: 0,
             reset_at: 1_700_000_060,
-            rejected_by: None,
         };
 
         let response = inject_rate_limit_headers(make_response(), &outcome);

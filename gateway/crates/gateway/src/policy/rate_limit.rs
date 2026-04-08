@@ -21,13 +21,6 @@ use super::engine::EvaluatedPolicy;
 // Types
 // ---------------------------------------------------------------------------
 
-/// Which level caused a rate limit rejection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RateLimitLevel {
-    Global,
-    ServiceAccount,
-}
-
 /// Result of a single sliding-window check at one level.
 #[derive(Debug, Clone)]
 pub struct WindowCheckResult {
@@ -46,8 +39,6 @@ pub struct RateLimitOutcome {
     pub remaining: u32,
     /// The earliest window reset (Unix timestamp, seconds).
     pub reset_at: u64,
-    /// Which level caused rejection, if any.
-    pub rejected_by: Option<RateLimitLevel>,
 }
 
 // ---------------------------------------------------------------------------
@@ -116,9 +107,7 @@ fn build_check_result(
 /// Returns: {current_count, previous_count}
 const LUA_SLIDING_WINDOW: &str = r"
 local current = redis.call('INCR', KEYS[1])
-if current == 1 then
-    redis.call('EXPIRE', KEYS[1], ARGV[1])
-end
+redis.call('EXPIRE', KEYS[1], ARGV[1])
 local previous = tonumber(redis.call('GET', KEYS[2]) or '0')
 return {current, previous}
 ";
@@ -149,7 +138,7 @@ impl SlidingWindowLimiter {
         key_prefix: &str,
         limit: u32,
     ) -> Result<WindowCheckResult, StorageError> {
-        let now_secs = now_unix_secs();
+        let now_secs = now_unix_secs()?;
         let current_window = now_secs / self.window_secs;
         let prev_window = current_window.saturating_sub(1);
 
@@ -202,8 +191,9 @@ impl RateLimitEvaluator {
 
     /// Evaluate rate limits at all applicable levels.
     ///
-    /// Checks global first (cheapest — shared key), then per-SA if configured.
-    /// Short-circuits on the first rejected level.
+    /// Checks per-SA first (if configured), then global. This order ensures
+    /// that SA-rejected requests do not consume global quota, preventing one
+    /// aggressive tenant from starving others.
     ///
     /// # Errors
     ///
@@ -214,18 +204,69 @@ impl RateLimitEvaluator {
         sa_id: ServiceAccountId,
         evaluated: &EvaluatedPolicy,
     ) -> Result<RateLimitOutcome, GatewayError> {
-        // 1. Global check
+        // 1. Per-SA check first (if policy specifies rpm_limit).
+        //    Checked before global so rejected requests don't consume global quota.
+        let sa_result = if let Some(sa_rpm) = evaluated.rpm_limit {
+            let sa_key = format!("rl:sa:{sa_id}");
+            let result = self
+                .limiter
+                .check_and_increment(pool, &sa_key, sa_rpm)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        error = %e,
+                        rate_limit_backend = "redis",
+                        rate_limit_failure = "backend_unavailable",
+                        "rate limit: redis unavailable for SA check"
+                    );
+                    GatewayError::config(
+                        "rate_limiter_unavailable",
+                        "rate limiter temporarily unavailable",
+                    )
+                })?;
+
+            if !result.allowed {
+                let now = now_unix_secs().unwrap_or(result.reset_at);
+                let retry_after = result.reset_at.saturating_sub(now);
+                return Err(GatewayError::rate_limit(
+                    "rate_limit_exceeded",
+                    "service account rate limit exceeded",
+                    Some(retry_after),
+                ));
+            }
+            Some(result)
+        } else {
+            None
+        };
+
+        // 2. Global check
         let global = self
             .limiter
             .check_and_increment(pool, "rl:global", self.global_rpm)
             .await
             .map_err(|e| {
-                tracing::error!(error = %e, "rate limit: redis unavailable for global check");
-                GatewayError::rate_limit("service_unavailable", "rate limiter unavailable", Some(5))
+                tracing::error!(
+                    error = %e,
+                    rate_limit_backend = "redis",
+                    rate_limit_failure = "backend_unavailable",
+                    "rate limit: redis unavailable for global check"
+                );
+                GatewayError::config(
+                    "rate_limiter_unavailable",
+                    "rate limiter temporarily unavailable",
+                )
             })?;
 
         if !global.allowed {
-            let retry_after = global.reset_at.saturating_sub(now_unix_secs());
+            // Best-effort rollback: SA counter was incremented but the request
+            // is rejected at the global level, so undo the SA increment to
+            // prevent over-counting under global rate limit storms.
+            if evaluated.rpm_limit.is_some() {
+                self.rollback_sa_counter(pool, sa_id).await;
+            }
+
+            let now = now_unix_secs().unwrap_or(global.reset_at);
+            let retry_after = global.reset_at.saturating_sub(now);
             return Err(GatewayError::rate_limit(
                 "rate_limit_exceeded",
                 "global rate limit exceeded",
@@ -233,44 +274,39 @@ impl RateLimitEvaluator {
             ));
         }
 
-        // Start with global as the most restrictive result
+        // Build outcome from global, then merge SA result if present
         let mut outcome = RateLimitOutcome {
             limit: global.limit,
             remaining: global.remaining,
             reset_at: global.reset_at,
-            rejected_by: None,
         };
 
-        // 2. Per-SA check (if policy specifies rpm_limit)
-        if let Some(sa_rpm) = evaluated.rpm_limit {
-            let sa_key = format!("rl:sa:{sa_id}");
-            let sa_result = self
-                .limiter
-                .check_and_increment(pool, &sa_key, sa_rpm)
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, "rate limit: redis unavailable for SA check");
-                    GatewayError::rate_limit(
-                        "service_unavailable",
-                        "rate limiter unavailable",
-                        Some(5),
-                    )
-                })?;
-
-            if !sa_result.allowed {
-                let retry_after = sa_result.reset_at.saturating_sub(now_unix_secs());
-                return Err(GatewayError::rate_limit(
-                    "rate_limit_exceeded",
-                    "service account rate limit exceeded",
-                    Some(retry_after),
-                ));
-            }
-
-            // Track the most restrictive result for headers
-            outcome = most_restrictive(outcome, &sa_result);
+        if let Some(sa) = &sa_result {
+            outcome = most_restrictive(outcome, sa);
         }
 
         Ok(outcome)
+    }
+
+    /// Best-effort DECR of the SA's current-window counter.
+    ///
+    /// Called when the SA check passed but the global check rejected, so the
+    /// SA increment should be unwound. Failures are logged but do not propagate
+    /// — the safety-net TTL will eventually expire the key anyway.
+    async fn rollback_sa_counter(&self, pool: &RedisPool, sa_id: ServiceAccountId) {
+        let Ok(now_secs) = now_unix_secs() else {
+            return;
+        };
+        let current_window = now_secs / self.limiter.window_secs;
+        let sa_key = format!("rl:sa:{sa_id}:{current_window}");
+
+        if let Ok(mut conn) = pool.get().await {
+            let result: Result<i64, _> =
+                redis::cmd("DECR").arg(&sa_key).query_async(&mut conn).await;
+            if let Err(e) = result {
+                tracing::warn!(error = %e, key = %sa_key, "rate limit: failed to rollback SA counter");
+            }
+        }
     }
 }
 
@@ -281,18 +317,20 @@ fn most_restrictive(current: RateLimitOutcome, check: &WindowCheckResult) -> Rat
             limit: check.limit,
             remaining: check.remaining,
             reset_at: check.reset_at,
-            rejected_by: current.rejected_by,
         }
     } else {
         current
     }
 }
 
-fn now_unix_secs() -> u64 {
+fn now_unix_secs() -> Result<u64, StorageError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_secs()
+        .map(|d| d.as_secs())
+        .map_err(|e| {
+            tracing::error!(error = %e, "system clock is before UNIX epoch");
+            StorageError::Internal("system clock before UNIX epoch".to_owned())
+        })
 }
 
 // ===========================================================================
@@ -391,7 +429,6 @@ mod tests {
             limit: 1000,
             remaining: 500,
             reset_at: 2000,
-            rejected_by: None,
         };
         let check = WindowCheckResult {
             allowed: true,
@@ -411,7 +448,6 @@ mod tests {
             limit: 100,
             remaining: 10,
             reset_at: 1500,
-            rejected_by: None,
         };
         let check = WindowCheckResult {
             allowed: true,

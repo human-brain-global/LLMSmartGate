@@ -293,6 +293,20 @@ fn load_from(source: &dyn ConfigSource) -> Result<GatewayConfig, ConfigError> {
         DEFAULT_RATE_LIMIT_WINDOW_SECS,
     )?;
 
+    if global_rpm == 0 {
+        return Err(ConfigError::InvalidValue {
+            name: "LLMSMARTGATE_GLOBAL_RPM".to_owned(),
+            reason: "global_rpm must be > 0".to_owned(),
+        });
+    }
+
+    if rate_limit_window_secs == 0 {
+        return Err(ConfigError::InvalidValue {
+            name: "LLMSMARTGATE_RATE_LIMIT_WINDOW_SECS".to_owned(),
+            reason: "window_secs must be > 0".to_owned(),
+        });
+    }
+
     let log_level = optional(source, "RUST_LOG", DEFAULT_LOG_LEVEL);
     let otel_endpoint = source.get("OTEL_EXPORTER_OTLP_ENDPOINT");
     let service_name = optional(source, "OTEL_SERVICE_NAME", DEFAULT_SERVICE_NAME);
@@ -491,6 +505,36 @@ mod tests {
         assert!(
             msg.contains("VALKEY_URL"),
             "error should mention VALKEY_URL, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn zero_global_rpm_returns_error() {
+        let source = required_only_source().set("LLMSMARTGATE_GLOBAL_RPM", "0");
+
+        let result = load_from(&source);
+        assert!(result.is_err());
+
+        let err = result.expect_err("should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("LLMSMARTGATE_GLOBAL_RPM"),
+            "error should mention LLMSMARTGATE_GLOBAL_RPM, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn zero_window_secs_returns_error() {
+        let source = required_only_source().set("LLMSMARTGATE_RATE_LIMIT_WINDOW_SECS", "0");
+
+        let result = load_from(&source);
+        assert!(result.is_err());
+
+        let err = result.expect_err("should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("LLMSMARTGATE_RATE_LIMIT_WINDOW_SECS"),
+            "error should mention LLMSMARTGATE_RATE_LIMIT_WINDOW_SECS, got: {msg}"
         );
     }
 
