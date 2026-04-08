@@ -10,6 +10,7 @@ use llmsmartgate::config::GatewayConfig;
 use llmsmartgate::policy::concurrency::ConcurrencyLimiter;
 use llmsmartgate::policy::engine::PolicyCache;
 use llmsmartgate::policy::rate_limit::RateLimitEvaluator;
+use llmsmartgate::routing::router::RouteCache;
 use llmsmartgate::server::{AppState, build_router};
 use llmsmartgate::storage::postgres::create_pg_pool;
 use llmsmartgate::storage::redis::{RedisClient, create_redis_pool};
@@ -30,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
         timestamp_skew_secs = config.auth.timestamp_skew_secs,
         admin_key_cache_ttl_secs = config.auth.admin_key_cache_ttl_secs,
         policy_cache_ttl_secs = config.policy.cache_ttl_secs,
+        routing_cache_ttl_secs = config.routing.cache_ttl_secs,
         provider_timeout_ms = config.provider.timeout_ms,
         log_level = %config.observability.log_level,
         "Configuration loaded"
@@ -54,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
         .build();
 
     let policy_cache = PolicyCache::new(config.policy.cache_ttl_secs);
+    let route_cache = RouteCache::new(config.routing.cache_ttl_secs);
     let rate_limit_evaluator = RateLimitEvaluator::new(&config.rate_limit);
     let concurrency_limiter = ConcurrencyLimiter::new(redis_pool.clone());
 
@@ -66,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
         policy_cache: Some(policy_cache),
         rate_limit_evaluator: Some(rate_limit_evaluator),
         concurrency_limiter: Some(concurrency_limiter),
+        route_cache: Some(route_cache),
     };
     let app = build_router(state);
 

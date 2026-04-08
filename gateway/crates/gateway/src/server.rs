@@ -23,6 +23,7 @@ use crate::models::AdminApiKey;
 use crate::policy::concurrency::ConcurrencyLimiter;
 use crate::policy::engine::PolicyCache;
 use crate::policy::rate_limit::RateLimitEvaluator;
+use crate::routing::router::RouteCache;
 
 /// Header name used for request ID propagation.
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -50,6 +51,8 @@ pub struct AppState {
     pub rate_limit_evaluator: Option<RateLimitEvaluator>,
     /// Concurrency limiter. `None` in unit tests.
     pub concurrency_limiter: Option<ConcurrencyLimiter>,
+    /// In-memory route resolution cache. `None` in unit tests.
+    pub route_cache: Option<RouteCache>,
 }
 
 impl AppState {
@@ -122,6 +125,18 @@ impl AppState {
         self.concurrency_limiter.as_ref().ok_or_else(|| {
             tracing::warn!("concurrency limiter not available");
             GatewayError::config("internal_error", "concurrency limiter not available")
+        })
+    }
+
+    /// Get the route cache, or return 500 if not initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GatewayError::Config` with code `internal_error` if the cache is `None`.
+    pub fn require_route_cache(&self) -> Result<&RouteCache, GatewayError> {
+        self.route_cache.as_ref().ok_or_else(|| {
+            tracing::warn!("route cache not available");
+            GatewayError::config("internal_error", "route cache not available")
         })
     }
 }
@@ -279,6 +294,7 @@ mod tests {
             policy_cache: None,
             rate_limit_evaluator: None,
             concurrency_limiter: None,
+            route_cache: None,
         }
     }
 

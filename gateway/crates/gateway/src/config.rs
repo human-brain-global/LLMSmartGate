@@ -63,6 +63,7 @@ pub struct GatewayConfig {
     pub redis: RedisConfig,
     pub auth: AuthConfig,
     pub policy: PolicyConfig,
+    pub routing: RoutingConfig,
     pub rate_limit: RateLimitConfig,
     pub provider: ProviderConfig,
     pub observability: ObservabilityConfig,
@@ -122,6 +123,13 @@ pub struct PolicyConfig {
     pub cache_ttl_secs: u64,
 }
 
+/// Routing engine configuration.
+#[derive(Debug, Clone)]
+pub struct RoutingConfig {
+    /// TTL for the in-memory route resolution cache (seconds).
+    pub cache_ttl_secs: u64,
+}
+
 /// Rate limiting configuration.
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
@@ -168,6 +176,9 @@ impl Default for GatewayConfig {
             policy: PolicyConfig {
                 cache_ttl_secs: DEFAULT_POLICY_CACHE_TTL_SECS,
             },
+            routing: RoutingConfig {
+                cache_ttl_secs: DEFAULT_ROUTING_CACHE_TTL_SECS,
+            },
             rate_limit: RateLimitConfig {
                 global_rpm: DEFAULT_GLOBAL_RPM,
                 window_secs: DEFAULT_RATE_LIMIT_WINDOW_SECS,
@@ -194,6 +205,7 @@ const DEFAULT_TIMESTAMP_SKEW_SECS: u64 = 300;
 const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_POLICY_CACHE_TTL_SECS: u64 = 30;
 const DEFAULT_ADMIN_KEY_CACHE_TTL_SECS: u64 = 30;
+const DEFAULT_ROUTING_CACHE_TTL_SECS: u64 = 60;
 const DEFAULT_GLOBAL_RPM: u32 = 1000;
 const DEFAULT_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const DEFAULT_LOG_LEVEL: &str = "info";
@@ -286,6 +298,12 @@ fn load_from(source: &dyn ConfigSource) -> Result<GatewayConfig, ConfigError> {
         DEFAULT_ADMIN_KEY_CACHE_TTL_SECS,
     )?;
 
+    let routing_cache_ttl_secs: u64 = parse_val(
+        source,
+        "LLMSMARTGATE_ROUTING_CACHE_TTL_SECS",
+        DEFAULT_ROUTING_CACHE_TTL_SECS,
+    )?;
+
     let global_rpm: u32 = parse_val(source, "LLMSMARTGATE_GLOBAL_RPM", DEFAULT_GLOBAL_RPM)?;
     let rate_limit_window_secs: u64 = parse_val(
         source,
@@ -327,6 +345,9 @@ fn load_from(source: &dyn ConfigSource) -> Result<GatewayConfig, ConfigError> {
         },
         policy: PolicyConfig {
             cache_ttl_secs: policy_cache_ttl_secs,
+        },
+        routing: RoutingConfig {
+            cache_ttl_secs: routing_cache_ttl_secs,
         },
         rate_limit: RateLimitConfig {
             global_rpm,
@@ -411,6 +432,7 @@ mod tests {
             .set("OTEL_SERVICE_NAME", "test-gateway")
             .set("LLMSMARTGATE_POLICY_CACHE_TTL_SECS", "60")
             .set("LLMSMARTGATE_ADMIN_KEY_CACHE_TTL_SECS", "15")
+            .set("LLMSMARTGATE_ROUTING_CACHE_TTL_SECS", "120")
             .set("LLMSMARTGATE_GLOBAL_RPM", "500")
             .set("LLMSMARTGATE_RATE_LIMIT_WINDOW_SECS", "30")
     }
@@ -449,6 +471,7 @@ mod tests {
         );
         assert_eq!(config.observability.service_name, "test-gateway");
         assert_eq!(config.policy.cache_ttl_secs, 60);
+        assert_eq!(config.routing.cache_ttl_secs, 120);
         assert_eq!(config.rate_limit.global_rpm, 500);
         assert_eq!(config.rate_limit.window_secs, 30);
     }

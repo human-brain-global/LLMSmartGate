@@ -398,6 +398,7 @@ mod tests {
             policy_cache: None,
             rate_limit_evaluator: None,
             concurrency_limiter: None,
+            route_cache: None,
         };
 
         let app = Router::new()
@@ -453,6 +454,7 @@ mod tests {
             policy_cache: None,
             rate_limit_evaluator: None,
             concurrency_limiter: None,
+            route_cache: None,
         };
 
         let app = Router::new()
@@ -492,6 +494,7 @@ mod tests {
             policy_cache: None,
             rate_limit_evaluator: None,
             concurrency_limiter: None,
+            route_cache: None,
         };
 
         let app = Router::new()
@@ -543,6 +546,7 @@ mod tests {
             policy_cache: None,
             rate_limit_evaluator: None,
             concurrency_limiter: None,
+            route_cache: None,
         };
 
         let app = Router::new()
@@ -611,6 +615,7 @@ mod tests {
             policy_cache: None,
             rate_limit_evaluator: None,
             concurrency_limiter: None,
+            route_cache: None,
         };
 
         let app = Router::new()

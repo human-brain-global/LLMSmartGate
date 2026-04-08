@@ -108,6 +108,13 @@ pub async fn create_route(
 
     let route = repo.create(&input).await.map_err(map_storage_error)?;
 
+    // Synchronous invalidation: ensures the response is not sent before the
+    // cache is clean, preventing a stale-read race on this instance.
+    if let Some(ref cache) = state.route_cache {
+        cache.invalidate_all().await;
+        tracing::debug!(route_id = %route.id, "route cache invalidated: route created");
+    }
+
     tracing::info!(admin_id = %admin_ctx.admin_id, route_id = %route.id, action = "route.created", "admin operation");
     emit_audit(
         pool,
@@ -221,6 +228,13 @@ pub async fn update_route(
         .await
         .map_err(map_storage_error)?;
 
+    // Synchronous invalidation: ensures the response is not sent before the
+    // cache is clean, preventing a stale-read race on this instance.
+    if let Some(ref cache) = state.route_cache {
+        cache.invalidate_all().await;
+        tracing::debug!(route_id = %id, "route cache invalidated: route updated");
+    }
+
     tracing::info!(admin_id = %admin_ctx.admin_id, route_id = %id, action = "route.updated", "admin operation");
     emit_audit(
         pool,
@@ -253,6 +267,13 @@ pub async fn delete_route(
     repo.delete(RouteId::from_uuid(id))
         .await
         .map_err(map_storage_error)?;
+
+    // Synchronous invalidation: ensures the response is not sent before the
+    // cache is clean, preventing a stale-read race on this instance.
+    if let Some(ref cache) = state.route_cache {
+        cache.invalidate_all().await;
+        tracing::debug!(route_id = %id, "route cache invalidated: route deleted");
+    }
 
     tracing::info!(admin_id = %admin_ctx.admin_id, route_id = %id, action = "route.deleted", "admin operation");
     emit_audit(
