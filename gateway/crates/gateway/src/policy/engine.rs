@@ -32,6 +32,10 @@ pub struct EvaluatedPolicy {
     pub model_access: ModelAccessRules,
     pub token_limits: TokenLimits,
     pub feature_flags: FeatureFlags,
+    /// Requests-per-minute limit from merged policies (most restrictive wins).
+    pub rpm_limit: Option<u32>,
+    /// Max concurrent in-flight requests from merged policies.
+    pub concurrency_limit: Option<u32>,
 }
 
 impl Default for EvaluatedPolicy {
@@ -48,6 +52,8 @@ impl Default for EvaluatedPolicy {
                 allow_tools: false,
                 allow_files: false,
             },
+            rpm_limit: None,
+            concurrency_limit: None,
         }
     }
 }
@@ -70,23 +76,47 @@ pub struct PolicyDecision {
 // Merge logic
 // ---------------------------------------------------------------------------
 
+/// Validate a positive i32 limit and merge as minimum into an accumulator.
+///
+/// Returns `Err` with `policy_config_invalid` if the value is <= 0 (fail-safe).
+fn merge_positive_limit(
+    current: &mut Option<u32>,
+    value: Option<i32>,
+    policy_id: crate::types::PolicyId,
+    field_name: &str,
+) -> Result<(), GatewayError> {
+    if let Some(limit) = value {
+        if limit <= 0 {
+            tracing::error!(
+                policy_id = %policy_id,
+                %field_name,
+                limit,
+                "policy: negative or zero {field_name} — denying access (fail-safe)"
+            );
+            return Err(GatewayError::policy(
+                "policy_config_invalid",
+                format!("policy has invalid {field_name} configuration"),
+            ));
+        }
+        #[allow(clippy::cast_sign_loss)] // limit > 0 is guaranteed by the guard above
+        let limit = limit as u32;
+        *current = Some(current.map_or(limit, |cur| cur.min(limit)));
+    }
+    Ok(())
+}
+
 /// Merge multiple policies using the "most restrictive wins" strategy.
 ///
 /// Rules:
 /// - **allowed_models**: intersection (empty = "no constraint from this policy")
 /// - **denied_models**: union
-/// - **max_input_tokens / max_output_tokens**: minimum of all `Some` values
+/// - **max_input_tokens / max_output_tokens / rpm_limit / concurrency_limit**: minimum of all `Some` values
 /// - **allow_streaming / allow_tools / allow_files**: AND
-///
-/// **Note on pattern intersection**: `allowed_models` uses exact string
-/// comparison of patterns, not semantic glob matching. Two policies with
-/// `["gpt-4*"]` and `["gpt-4-turbo*"]` produce an empty intersection.
 ///
 /// # Errors
 ///
-/// Returns `GatewayError::Policy` if `allowed_models_json` or
-/// `denied_models_json` contains malformed JSON (fail-safe: deny access
-/// rather than silently granting it).
+/// Returns `GatewayError::Policy` if JSON fields are malformed or numeric limits
+/// are non-positive (fail-safe: deny access rather than silently granting it).
 pub fn merge_policies(policies: &[Policy]) -> Result<EvaluatedPolicy, GatewayError> {
     if policies.is_empty() {
         return Ok(EvaluatedPolicy::default());
@@ -99,6 +129,8 @@ pub fn merge_policies(policies: &[Policy]) -> Result<EvaluatedPolicy, GatewayErr
     let mut allow_streaming = true;
     let mut allow_tools = true;
     let mut allow_files = true;
+    let mut rpm_limit: Option<u32> = None;
+    let mut concurrency_limit: Option<u32> = None;
     let mut first_allowlist = true;
 
     for policy in policies {
@@ -143,43 +175,32 @@ pub fn merge_policies(policies: &[Policy]) -> Result<EvaluatedPolicy, GatewayErr
         denied_models_set.extend(policy_denied);
 
         // Token limits: minimum (reject negative values at read boundary — fail-safe)
-        if let Some(limit) = policy.max_input_tokens {
-            if limit <= 0 {
-                tracing::error!(
-                    policy_id = %policy.id,
-                    max_input_tokens = limit,
-                    "policy: negative or zero max_input_tokens — denying access (fail-safe)"
-                );
-                return Err(GatewayError::policy(
-                    "policy_config_invalid",
-                    "policy has invalid max_input_tokens configuration",
-                ));
-            }
-            #[allow(clippy::cast_sign_loss)] // limit > 0 is guaranteed by the guard above
-            let limit = limit as u32;
-            max_input_tokens = Some(max_input_tokens.map_or(limit, |cur| cur.min(limit)));
-        }
-        if let Some(limit) = policy.max_output_tokens {
-            if limit <= 0 {
-                tracing::error!(
-                    policy_id = %policy.id,
-                    max_output_tokens = limit,
-                    "policy: negative or zero max_output_tokens — denying access (fail-safe)"
-                );
-                return Err(GatewayError::policy(
-                    "policy_config_invalid",
-                    "policy has invalid max_output_tokens configuration",
-                ));
-            }
-            #[allow(clippy::cast_sign_loss)] // limit > 0 is guaranteed by the guard above
-            let limit = limit as u32;
-            max_output_tokens = Some(max_output_tokens.map_or(limit, |cur| cur.min(limit)));
-        }
+        merge_positive_limit(
+            &mut max_input_tokens,
+            policy.max_input_tokens,
+            policy.id,
+            "max_input_tokens",
+        )?;
+        merge_positive_limit(
+            &mut max_output_tokens,
+            policy.max_output_tokens,
+            policy.id,
+            "max_output_tokens",
+        )?;
 
         // Feature flags: AND
         allow_streaming = allow_streaming && policy.allow_streaming;
         allow_tools = allow_tools && policy.allow_tools;
         allow_files = allow_files && policy.allow_files;
+
+        // Rate limits: minimum (same pattern as token limits)
+        merge_positive_limit(&mut rpm_limit, policy.rpm_limit, policy.id, "rpm_limit")?;
+        merge_positive_limit(
+            &mut concurrency_limit,
+            policy.concurrency_limit,
+            policy.id,
+            "concurrency_limit",
+        )?;
     }
 
     Ok(EvaluatedPolicy {
@@ -196,6 +217,8 @@ pub fn merge_policies(policies: &[Policy]) -> Result<EvaluatedPolicy, GatewayErr
             allow_tools,
             allow_files,
         },
+        rpm_limit,
+        concurrency_limit,
     })
 }
 
@@ -673,6 +696,80 @@ mod tests {
         assert!(cache.cache.get(&sa1).await.is_none());
         assert!(cache.cache.get(&sa2).await.is_none());
     }
+
+    // -----------------------------------------------------------------------
+    // merge_policies -- rate limits
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_rpm_limit_most_restrictive() {
+        let p1 = make_policy(|p| {
+            p.rpm_limit = Some(1000);
+        });
+        let p2 = make_policy(|p| {
+            p.rpm_limit = Some(500);
+        });
+        let result = merge_policies(&[p1, p2]).unwrap();
+        assert_eq!(result.rpm_limit, Some(500));
+    }
+
+    #[test]
+    fn merge_concurrency_limit_most_restrictive() {
+        let p1 = make_policy(|p| {
+            p.concurrency_limit = Some(10);
+        });
+        let p2 = make_policy(|p| {
+            p.concurrency_limit = Some(5);
+        });
+        let result = merge_policies(&[p1, p2]).unwrap();
+        assert_eq!(result.concurrency_limit, Some(5));
+    }
+
+    #[test]
+    fn merge_rpm_limit_none_means_no_constraint() {
+        let p1 = make_policy(|p| {
+            p.rpm_limit = Some(1000);
+        });
+        let p2 = make_policy(|_| {}); // no rpm_limit
+        let result = merge_policies(&[p1, p2]).unwrap();
+        assert_eq!(result.rpm_limit, Some(1000));
+    }
+
+    #[test]
+    fn merge_all_none_rate_limits() {
+        let p1 = make_policy(|_| {});
+        let result = merge_policies(&[p1]).unwrap();
+        assert!(result.rpm_limit.is_none());
+        assert!(result.concurrency_limit.is_none());
+    }
+
+    #[test]
+    fn merge_rejects_zero_rpm_limit() {
+        let p = make_policy(|p| {
+            p.rpm_limit = Some(0);
+        });
+        let err = merge_policies(&[p]).unwrap_err();
+        match err {
+            GatewayError::Policy { code, .. } => assert_eq!(code, "policy_config_invalid"),
+            other => panic!("expected Policy error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_rejects_negative_concurrency_limit() {
+        let p = make_policy(|p| {
+            p.concurrency_limit = Some(-1);
+        });
+        let err = merge_policies(&[p]).unwrap_err();
+        match err {
+            GatewayError::Policy { code, .. } => assert_eq!(code, "policy_config_invalid"),
+            other => panic!("expected Policy error, got: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // merge_policies -- token limit errors
+    // -----------------------------------------------------------------------
 
     #[test]
     fn merge_rejects_negative_token_limits() {

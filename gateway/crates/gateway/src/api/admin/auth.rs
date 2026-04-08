@@ -396,6 +396,8 @@ mod tests {
             key_store: None,
             admin_key_cache: None,
             policy_cache: None,
+            rate_limit_evaluator: None,
+            concurrency_limiter: None,
         };
 
         let app = Router::new()
@@ -449,6 +451,8 @@ mod tests {
             key_store: None,
             admin_key_cache: None,
             policy_cache: None,
+            rate_limit_evaluator: None,
+            concurrency_limiter: None,
         };
 
         let app = Router::new()
@@ -486,6 +490,8 @@ mod tests {
             key_store: None,
             admin_key_cache: None,
             policy_cache: None,
+            rate_limit_evaluator: None,
+            concurrency_limiter: None,
         };
 
         let app = Router::new()
@@ -535,6 +541,8 @@ mod tests {
             key_store: None,
             admin_key_cache: None,
             policy_cache: None,
+            rate_limit_evaluator: None,
+            concurrency_limiter: None,
         };
 
         let app = Router::new()
@@ -601,6 +609,8 @@ mod tests {
             key_store: None,
             admin_key_cache: None,
             policy_cache: None,
+            rate_limit_evaluator: None,
+            concurrency_limiter: None,
         };
 
         let app = Router::new()
