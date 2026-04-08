@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use llmsmartgate::config::GatewayConfig;
 use llmsmartgate::policy::engine::PolicyCache;
+use llmsmartgate::policy::rate_limit::RateLimitEvaluator;
 use llmsmartgate::server::{AppState, build_router};
 
 #[tokio::main]
@@ -40,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
         .build();
 
     let policy_cache = PolicyCache::new(config.policy.cache_ttl_secs);
+    let rate_limit_evaluator = RateLimitEvaluator::new(&config.rate_limit);
 
     let state = AppState {
         config: Arc::new(config),
@@ -48,6 +50,8 @@ async fn main() -> anyhow::Result<()> {
         key_store: None,
         admin_key_cache: Some(admin_key_cache),
         policy_cache: Some(policy_cache),
+        rate_limit_evaluator: Some(rate_limit_evaluator),
+        concurrency_limiter: None, // initialized when Redis pool is available
     };
     let app = build_router(state);
 

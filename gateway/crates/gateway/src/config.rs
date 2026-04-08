@@ -63,6 +63,7 @@ pub struct GatewayConfig {
     pub redis: RedisConfig,
     pub auth: AuthConfig,
     pub policy: PolicyConfig,
+    pub rate_limit: RateLimitConfig,
     pub provider: ProviderConfig,
     pub observability: ObservabilityConfig,
 }
@@ -121,6 +122,15 @@ pub struct PolicyConfig {
     pub cache_ttl_secs: u64,
 }
 
+/// Rate limiting configuration.
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    /// Global requests-per-minute limit applied to all traffic.
+    pub global_rpm: u32,
+    /// Sliding window size in seconds.
+    pub window_secs: u64,
+}
+
 /// Provider communication configuration.
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
@@ -158,6 +168,10 @@ impl Default for GatewayConfig {
             policy: PolicyConfig {
                 cache_ttl_secs: DEFAULT_POLICY_CACHE_TTL_SECS,
             },
+            rate_limit: RateLimitConfig {
+                global_rpm: DEFAULT_GLOBAL_RPM,
+                window_secs: DEFAULT_RATE_LIMIT_WINDOW_SECS,
+            },
             provider: ProviderConfig {
                 timeout_ms: DEFAULT_PROVIDER_TIMEOUT_MS,
             },
@@ -180,6 +194,8 @@ const DEFAULT_TIMESTAMP_SKEW_SECS: u64 = 300;
 const DEFAULT_PROVIDER_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_POLICY_CACHE_TTL_SECS: u64 = 30;
 const DEFAULT_ADMIN_KEY_CACHE_TTL_SECS: u64 = 30;
+const DEFAULT_GLOBAL_RPM: u32 = 1000;
+const DEFAULT_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_SERVICE_NAME: &str = "llmsmartgate";
 
@@ -270,6 +286,13 @@ fn load_from(source: &dyn ConfigSource) -> Result<GatewayConfig, ConfigError> {
         DEFAULT_ADMIN_KEY_CACHE_TTL_SECS,
     )?;
 
+    let global_rpm: u32 = parse_val(source, "LLMSMARTGATE_GLOBAL_RPM", DEFAULT_GLOBAL_RPM)?;
+    let rate_limit_window_secs: u64 = parse_val(
+        source,
+        "LLMSMARTGATE_RATE_LIMIT_WINDOW_SECS",
+        DEFAULT_RATE_LIMIT_WINDOW_SECS,
+    )?;
+
     let log_level = optional(source, "RUST_LOG", DEFAULT_LOG_LEVEL);
     let otel_endpoint = source.get("OTEL_EXPORTER_OTLP_ENDPOINT");
     let service_name = optional(source, "OTEL_SERVICE_NAME", DEFAULT_SERVICE_NAME);
@@ -290,6 +313,10 @@ fn load_from(source: &dyn ConfigSource) -> Result<GatewayConfig, ConfigError> {
         },
         policy: PolicyConfig {
             cache_ttl_secs: policy_cache_ttl_secs,
+        },
+        rate_limit: RateLimitConfig {
+            global_rpm,
+            window_secs: rate_limit_window_secs,
         },
         provider: ProviderConfig {
             timeout_ms: provider_timeout_ms,
@@ -370,6 +397,8 @@ mod tests {
             .set("OTEL_SERVICE_NAME", "test-gateway")
             .set("LLMSMARTGATE_POLICY_CACHE_TTL_SECS", "60")
             .set("LLMSMARTGATE_ADMIN_KEY_CACHE_TTL_SECS", "15")
+            .set("LLMSMARTGATE_GLOBAL_RPM", "500")
+            .set("LLMSMARTGATE_RATE_LIMIT_WINDOW_SECS", "30")
     }
 
     /// Returns a `MapSource` with only required fields set.
@@ -406,6 +435,8 @@ mod tests {
         );
         assert_eq!(config.observability.service_name, "test-gateway");
         assert_eq!(config.policy.cache_ttl_secs, 60);
+        assert_eq!(config.rate_limit.global_rpm, 500);
+        assert_eq!(config.rate_limit.window_secs, 30);
     }
 
     #[test]
@@ -422,6 +453,11 @@ mod tests {
         assert_eq!(config.redis.pool_size, DEFAULT_VALKEY_POOL_SIZE);
         assert_eq!(config.auth.timestamp_skew_secs, DEFAULT_TIMESTAMP_SKEW_SECS);
         assert_eq!(config.provider.timeout_ms, DEFAULT_PROVIDER_TIMEOUT_MS);
+        assert_eq!(config.rate_limit.global_rpm, DEFAULT_GLOBAL_RPM);
+        assert_eq!(
+            config.rate_limit.window_secs,
+            DEFAULT_RATE_LIMIT_WINDOW_SECS
+        );
         assert_eq!(config.observability.log_level, DEFAULT_LOG_LEVEL);
         assert!(config.observability.otel_endpoint.is_none());
         assert_eq!(config.observability.service_name, DEFAULT_SERVICE_NAME);

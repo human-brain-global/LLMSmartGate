@@ -20,7 +20,9 @@ use crate::auth::key_store::KeyStore;
 use crate::config::GatewayConfig;
 use crate::error::GatewayError;
 use crate::models::AdminApiKey;
+use crate::policy::concurrency::ConcurrencyLimiter;
 use crate::policy::engine::PolicyCache;
+use crate::policy::rate_limit::RateLimitEvaluator;
 
 /// Header name used for request ID propagation.
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -44,6 +46,10 @@ pub struct AppState {
     pub admin_key_cache: Option<moka::future::Cache<(), Vec<AdminApiKey>>>,
     /// In-memory policy evaluation cache. `None` in unit tests.
     pub policy_cache: Option<PolicyCache>,
+    /// Rate limit evaluator (sliding window). `None` in unit tests.
+    pub rate_limit_evaluator: Option<RateLimitEvaluator>,
+    /// Concurrency limiter. `None` in unit tests.
+    pub concurrency_limiter: Option<ConcurrencyLimiter>,
 }
 
 impl AppState {
@@ -94,6 +100,30 @@ impl AppState {
             GatewayError::config("internal_error", "policy cache not available")
         })
     }
+
+    /// Get the rate limit evaluator, or return 500 if not initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GatewayError::Config` with code `internal_error` if the evaluator is `None`.
+    pub fn require_rate_limit_evaluator(&self) -> Result<&RateLimitEvaluator, GatewayError> {
+        self.rate_limit_evaluator.as_ref().ok_or_else(|| {
+            tracing::warn!("rate limit evaluator not available");
+            GatewayError::config("internal_error", "rate limit evaluator not available")
+        })
+    }
+
+    /// Get the concurrency limiter, or return 500 if not initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GatewayError::Config` with code `internal_error` if the limiter is `None`.
+    pub fn require_concurrency_limiter(&self) -> Result<&ConcurrencyLimiter, GatewayError> {
+        self.concurrency_limiter.as_ref().ok_or_else(|| {
+            tracing::warn!("concurrency limiter not available");
+            GatewayError::config("internal_error", "concurrency limiter not available")
+        })
+    }
 }
 
 /// Build the complete Axum router with all route groups and middleware.
@@ -112,12 +142,17 @@ pub fn build_router(state: AppState) -> Router {
         .route("/metrics", get(health::metrics_handler))
         .layer(CorsLayer::permissive());
 
-    // Data plane routes -- protected by auth middleware
+    // Data plane routes -- protected by auth middleware, then rate limiting.
+    // Layers execute bottom-up: auth runs first, then rate_limit_middleware.
     let data_plane = Router::new()
         .route("/v1/chat/completions", post(data_plane_post_placeholder))
         .route("/v1/responses", post(data_plane_post_placeholder))
         .route("/v1/embeddings", post(data_plane_post_placeholder))
         .route("/v1/models", get(data_plane_get_placeholder))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::policy::middleware::rate_limit_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::middleware::auth_middleware,
@@ -242,6 +277,8 @@ mod tests {
             key_store: None,
             admin_key_cache: None,
             policy_cache: None,
+            rate_limit_evaluator: None,
+            concurrency_limiter: None,
         }
     }
 
