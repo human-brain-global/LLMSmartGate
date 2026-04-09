@@ -286,6 +286,61 @@ impl GatewayError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// From<ProviderError> for GatewayError
+// ---------------------------------------------------------------------------
+
+impl From<crate::providers::ProviderError> for GatewayError {
+    fn from(err: crate::providers::ProviderError) -> Self {
+        use crate::providers::ProviderError;
+
+        match err {
+            ProviderError::Timeout { ref provider } => GatewayError::provider(
+                "provider_timeout",
+                format!("upstream provider '{provider}' timed out"),
+                StatusCode::GATEWAY_TIMEOUT,
+            ),
+            ProviderError::RateLimited {
+                ref provider,
+                retry_after,
+            } => GatewayError::rate_limit(
+                "provider_rate_limited",
+                format!("upstream provider '{provider}' rate limited"),
+                retry_after.map(u64::from),
+            ),
+            ProviderError::AuthFailure { ref provider } => GatewayError::provider(
+                "provider_auth_error",
+                format!("upstream provider '{provider}' authentication failed"),
+                StatusCode::BAD_GATEWAY,
+            ),
+            ProviderError::BadRequest {
+                ref provider,
+                ref message,
+            } => GatewayError::provider(
+                "provider_bad_request",
+                format!("upstream provider '{provider}': {message}"),
+                StatusCode::BAD_REQUEST,
+            ),
+            ProviderError::ServerError {
+                ref provider,
+                status,
+            } => {
+                let http_status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+                GatewayError::provider(
+                    "provider_unavailable",
+                    format!("upstream provider '{provider}' returned HTTP {status}"),
+                    http_status,
+                )
+            }
+            ProviderError::ConnectionFailed { ref provider } => GatewayError::provider(
+                "provider_connection_failed",
+                format!("failed to connect to upstream provider '{provider}'"),
+                StatusCode::BAD_GATEWAY,
+            ),
+        }
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================

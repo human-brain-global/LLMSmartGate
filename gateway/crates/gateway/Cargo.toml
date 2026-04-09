@@ -46,6 +46,13 @@ metrics-exporter-prometheus = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
+# Async streams
+futures-core = { workspace = true }
+tokio-stream = { workspace = true }
+
+# TLS
+rustls = { workspace = true }
+
 # Utilities
 tokio = { workspace = true }
 uuid = { workspace = true }
