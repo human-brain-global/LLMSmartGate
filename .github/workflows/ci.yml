@@ -21,7 +21,54 @@ jobs:
           workspaces: gateway
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - name: Unit tests (no DB required)
+        run: cargo test -- --skip storage:: --skip api::admin::auth --skip routing::resolver
+
+  gateway-integration:
+    name: Gateway Integration Tests
+    runs-on: ubuntu-latest
+    needs: gateway
+    defaults:
+      run:
+        working-directory: gateway
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: llmsmartgate
+          POSTGRES_PASSWORD: llmsmartgate
+          POSTGRES_DB: llmsmartgate_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      valkey:
+        image: valkey/valkey:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://llmsmartgate:llmsmartgate@localhost:5432/llmsmartgate_test
+      VALKEY_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gateway
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features postgres
+      - name: Run migrations
+        run: cargo sqlx migrate run --source migrations
+      - name: Integration tests
+        run: cargo test
 
   admin-console:
     name: Admin Console (SvelteKit)

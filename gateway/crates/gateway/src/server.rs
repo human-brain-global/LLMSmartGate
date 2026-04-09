@@ -23,6 +23,7 @@ use crate::models::AdminApiKey;
 use crate::policy::concurrency::ConcurrencyLimiter;
 use crate::policy::engine::PolicyCache;
 use crate::policy::rate_limit::RateLimitEvaluator;
+use crate::providers::ProviderRegistry;
 use crate::routing::router::RouteCache;
 
 /// Header name used for request ID propagation.
@@ -53,6 +54,10 @@ pub struct AppState {
     pub concurrency_limiter: Option<ConcurrencyLimiter>,
     /// In-memory route resolution cache. `None` in unit tests.
     pub route_cache: Option<RouteCache>,
+    /// Shared HTTP client for upstream provider calls. `None` in unit tests.
+    pub http_client: Option<reqwest::Client>,
+    /// Registry of provider adapters. `None` in unit tests.
+    pub provider_registry: Option<Arc<ProviderRegistry>>,
 }
 
 impl AppState {
@@ -138,6 +143,33 @@ impl AppState {
             tracing::warn!("route cache not available");
             GatewayError::config("internal_error", "route cache not available")
         })
+    }
+
+    /// Get the HTTP client, or return 500 if not initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GatewayError::Config` with code `internal_error` if the client is `None`.
+    pub fn require_http_client(&self) -> Result<&reqwest::Client, GatewayError> {
+        self.http_client.as_ref().ok_or_else(|| {
+            tracing::warn!("http client not available");
+            GatewayError::config("internal_error", "http client not available")
+        })
+    }
+
+    /// Get the provider registry, or return 500 if not initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns `GatewayError::Config` with code `internal_error` if the registry is `None`.
+    pub fn require_provider_registry(&self) -> Result<&ProviderRegistry, GatewayError> {
+        self.provider_registry
+            .as_ref()
+            .map(AsRef::as_ref)
+            .ok_or_else(|| {
+                tracing::warn!("provider registry not available");
+                GatewayError::config("internal_error", "provider registry not available")
+            })
     }
 }
 
@@ -295,6 +327,8 @@ mod tests {
             rate_limit_evaluator: None,
             concurrency_limiter: None,
             route_cache: None,
+            http_client: None,
+            provider_registry: None,
         }
     }
 

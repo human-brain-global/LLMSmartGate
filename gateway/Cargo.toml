@@ -52,6 +52,13 @@ metrics-exporter-prometheus = { version = "0.16", default-features = false, feat
 thiserror = "1"
 anyhow = "1"
 
+# Async streams
+futures-core = "0.3"
+tokio-stream = "0.1"
+
+# TLS
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
 # Utilities
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }

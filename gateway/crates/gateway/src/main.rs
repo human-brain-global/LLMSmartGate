@@ -10,10 +10,14 @@ use llmsmartgate::config::GatewayConfig;
 use llmsmartgate::policy::concurrency::ConcurrencyLimiter;
 use llmsmartgate::policy::engine::PolicyCache;
 use llmsmartgate::policy::rate_limit::RateLimitEvaluator;
+use llmsmartgate::providers::ProviderRegistry;
+use llmsmartgate::providers::openai::OpenAIAdapter;
+use llmsmartgate::providers::vllm::VllmAdapter;
 use llmsmartgate::routing::router::RouteCache;
 use llmsmartgate::server::{AppState, build_router};
 use llmsmartgate::storage::postgres::create_pg_pool;
 use llmsmartgate::storage::redis::{RedisClient, create_redis_pool};
+use llmsmartgate::types::Provider;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -60,6 +64,23 @@ async fn main() -> anyhow::Result<()> {
     let rate_limit_evaluator = RateLimitEvaluator::new(&config.rate_limit);
     let concurrency_limiter = ConcurrencyLimiter::new(redis_pool.clone());
 
+    // Install the ring crypto provider for rustls (reqwest uses rustls-no-provider).
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls ring crypto provider");
+
+    // Per-route timeouts are set on each request by the provider adapter.
+    // No client-level timeout — it would shadow the per-route value.
+    let http_client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .pool_max_idle_per_host(20)
+        .build()
+        .expect("failed to build HTTP client");
+
+    let mut provider_registry = ProviderRegistry::new();
+    provider_registry.register(Provider::Openai, Box::new(OpenAIAdapter));
+    provider_registry.register(Provider::Vllm, Box::new(VllmAdapter));
+
     let state = AppState {
         config: Arc::new(config),
         db: Some(db),
@@ -70,6 +91,8 @@ async fn main() -> anyhow::Result<()> {
         rate_limit_evaluator: Some(rate_limit_evaluator),
         concurrency_limiter: Some(concurrency_limiter),
         route_cache: Some(route_cache),
+        http_client: Some(http_client),
+        provider_registry: Some(Arc::new(provider_registry)),
     };
     let app = build_router(state);
 
