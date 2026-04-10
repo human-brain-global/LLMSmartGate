@@ -22,7 +22,7 @@ jobs:
       - run: cargo fmt -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - name: Unit tests (no DB required)
-        run: cargo test -- --skip storage:: --skip api::admin::auth --skip routing::resolver
+        run: "cargo test -- --skip storage:: --skip api::admin::auth --skip routing::resolver"
 
   gateway-integration:
     name: Gateway Integration Tests
