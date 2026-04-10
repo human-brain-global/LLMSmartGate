@@ -16,8 +16,13 @@ check-all: check-gateway check-admin check-sdk
 # Load .env if present for database/redis URLs needed by integration tests
 set dotenv-load
 
+# Unit tests only (no DB required)
 check-gateway:
-    cd gateway && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+    cd gateway && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test -- --skip storage:: --skip api::admin::auth --skip routing::resolver
+
+# Integration tests (requires PostgreSQL + Valkey via `just dev-infra`)
+check-gateway-integration:
+    cd gateway && cargo test
 
 build-gateway:
     cd gateway && cargo build --release --locked
@@ -25,7 +30,12 @@ build-gateway:
 dev-gateway:
     cd gateway && cargo run
 
+# Unit tests only (no DB required)
 test-gateway:
+    cd gateway && cargo test -- --skip storage:: --skip api::admin::auth --skip routing::resolver
+
+# Integration tests (requires PostgreSQL + Valkey via `just dev-infra`)
+test-gateway-integration:
     cd gateway && cargo test
 
 # ── Admin Console (SvelteKit) ──
